@@ -1,5 +1,7 @@
 # Nitera
 
+[![Crates.io](https://img.shields.io/crates/v/nitera.svg)](https://crates.io/crates/nitera)
+
 A zero-dependency policy engine for filesystem, process, and network access in Rust.
 
 ## Status
@@ -18,11 +20,17 @@ Nitera has no external dependencies. The `.nitera` file parser and everything el
 
 ## Installation
 
-Not yet published to crates.io. Point Cargo at a path or git dependency until it is:
+Nitera is published on [crates.io](https://crates.io/crates/nitera). Add it with:
+
+```bash
+cargo add nitera
+```
+
+or add it directly to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nitera = { path = "../nitera" }
+nitera = "0.1.0"
 ```
 
 ## Quick start
