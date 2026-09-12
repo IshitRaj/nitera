@@ -149,6 +149,38 @@ mod tests {
     }
 
     #[test]
+    fn create_rules_use_the_same_precedence_as_other_filesystem_actions() {
+        let policy = Policy {
+            filesystem: FilesystemPolicy {
+                allow: FilesystemRules {
+                    create: vec![PathPattern("/tmp/**".into())],
+                    ..Default::default()
+                },
+                ask: FilesystemRules {
+                    create: vec![PathPattern("/tmp/review/**".into())],
+                    ..Default::default()
+                },
+                deny: FilesystemRules {
+                    create: vec![PathPattern("/tmp/review/blocked/**".into())],
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        };
+
+        let allowed = NiteraRequest::create("/tmp/created.txt", nitera::CreateKind::File);
+        let asked = NiteraRequest::create("/tmp/review/created.txt", nitera::CreateKind::File);
+        let denied = NiteraRequest::create(
+            "/tmp/review/blocked/created.txt",
+            nitera::CreateKind::Directory,
+        );
+
+        assert_eq!(policy.evaluate(&allowed, Path::new("/")), Decision::Allow);
+        assert_eq!(policy.evaluate(&asked, Path::new("/")), Decision::Ask);
+        assert_eq!(policy.evaluate(&denied, Path::new("/")), Decision::Deny);
+    }
+
+    #[test]
     fn unmatched_operation_fails_closed_to_deny() {
         // No rules configured anywhere for this policy at all.
         let policy = Policy {

@@ -9,6 +9,7 @@ pub struct FilesystemRules {
     pub read: Vec<PathPattern>,
     pub write: Vec<PathPattern>,
     pub delete: Vec<PathPattern>,
+    pub create: Vec<PathPattern>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

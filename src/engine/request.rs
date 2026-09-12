@@ -12,13 +12,25 @@ pub enum Operation {
     Read,
     Write,
     Delete,
+    Create,
     Execute,
     Connect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateKind {
+    File,
+    Directory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Path(PathBuf),
+
+    Create {
+        path: PathBuf,
+        kind: CreateKind,
+    },
 
     Process {
         command: String,
@@ -45,6 +57,10 @@ impl std::fmt::Display for NiteraRequest {
             (Operation::Read, Target::Path(path)) => write!(f, "read {}", path.display()),
             (Operation::Write, Target::Path(path)) => write!(f, "write {}", path.display()),
             (Operation::Delete, Target::Path(path)) => write!(f, "delete {}", path.display()),
+            (Operation::Create, Target::Create { path, kind }) => match kind {
+                CreateKind::File => write!(f, "Create file {}", path.display()),
+                CreateKind::Directory => write!(f, "Create directory {}", path.display()),
+            },
             (Operation::Execute, Target::Process { command, args, cwd }) => {
                 if args.is_empty() {
                     write!(f, "run `{command}` in {}", cwd.display())
@@ -66,6 +82,17 @@ impl NiteraRequest {
             resource: Resource::Filesystem,
             operation,
             target: Target::Path(path.into()),
+        }
+    }
+
+    pub fn create(path: impl Into<PathBuf>, kind: CreateKind) -> Self {
+        Self {
+            resource: Resource::Filesystem,
+            operation: Operation::Create,
+            target: Target::Create {
+                path: path.into(),
+                kind,
+            },
         }
     }
 

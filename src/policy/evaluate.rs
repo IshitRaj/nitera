@@ -72,6 +72,16 @@ impl Policy {
                 &self.filesystem.allow.delete,
             ),
 
+            (Resource::Filesystem, Operation::Create, Target::Create { path, kind: _ }) => {
+                Self::evaluate_path(
+                    path,
+                    base,
+                    &self.filesystem.deny.create,
+                    &self.filesystem.ask.create,
+                    &self.filesystem.allow.create,
+                )
+            }
+
             (
                 Resource::Process,
                 Operation::Execute,

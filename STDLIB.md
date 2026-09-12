@@ -5,7 +5,7 @@ Nitera currently uses the Rust standard library wherever possible.
 ## Used so far
 
 * `std::path::{Path, PathBuf, Component}` — filesystem path handling; `Component` specifically for lexically walking and resolving `.`/`..` segments in `normalize_path`.
-* `std::fs` — reading, writing, removing, and checking files (`read`, `write`, `read_to_string`, `remove_file`, `exists`) for the library's `read`/`write`/`delete` operations and test fixtures.
+* `std::fs` — reading, writing, removing, checking, and creating files and directories (`read`, `write`, `read_to_string`, `remove_file`, `create_dir`, `OpenOptions`) for the library's `read`/`write`/`delete`/`create` operations and test fixtures.
 * `std::process::{Command, Output}` — spawning and capturing the result of scoped commands in `execute`.
 * `std::net::TcpStream` — opening outbound connections in `connect`.
 * `std::io::Error` — underlying I/O failures, wrapped in `NiteraOperationError::Io` / `NiteraError::Io`.

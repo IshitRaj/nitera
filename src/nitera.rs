@@ -1,7 +1,9 @@
 use crate::approval::{ApprovalDecision, ApprovalHandler};
-use crate::engine::{Decision, NiteraRequest, Operation};
+use crate::engine::{CreateKind, Decision, NiteraRequest, Operation};
 use crate::policy::path::resolve_runtime_path;
 use crate::policy::{ParseError, Policy, parse};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Errors produced while performing a policy-controlled operation.
@@ -10,6 +12,7 @@ pub enum NiteraOperationError {
     Denied,
     Ask(NiteraRequest),
     Io(std::io::Error),
+    AlreadyExists(PathBuf),
 }
 
 pub struct Nitera {
@@ -28,6 +31,9 @@ impl std::fmt::Display for NiteraOperationError {
                  Call `.with_approval_handler(...)` on this Nitera, or handle `NiteraOperationError::Ask` yourself."
             ),
             NiteraOperationError::Io(err) => write!(f, "io error: {err}"),
+            NiteraOperationError::AlreadyExists(path) => {
+                write!(f, "target already exists: {}", path.display())
+            }
         }
     }
 }
@@ -125,6 +131,58 @@ impl Nitera {
         let request = NiteraRequest::filesystem(Operation::Delete, request_path.clone());
         self.authorize(&request)?;
         std::fs::remove_file(&request_path).map_err(NiteraOperationError::Io)
+    }
+
+    /// Creates a new file at `path` with `content`.
+    ///
+    /// `content` accepts anything that converts to bytes, including `&str`, `String`, `&[u8]`,
+    /// and `Vec<u8>`. Pass an empty value to create an empty file.
+    /// The path is authorized against the `create` filesystem rules before the filesystem is
+    /// touched. Creating an existing file returns `NiteraOperationError::AlreadyExists`.
+    pub fn create(
+        &self,
+        path: impl AsRef<Path>,
+        content: impl AsRef<[u8]>,
+    ) -> Result<(), NiteraOperationError> {
+        self.create_inner(path, CreateKind::File, Some(content.as_ref()))
+    }
+
+    /// Creates a new, single-level directory at `path`.
+    ///
+    /// The path is authorized against the same `create` filesystem rules as `create`. Creating
+    /// an existing directory returns `NiteraOperationError::AlreadyExists`; a missing parent
+    /// returns the underlying `Io` error.
+    pub fn create_dir(&self, path: impl AsRef<Path>) -> Result<(), NiteraOperationError> {
+        self.create_inner(path, CreateKind::Directory, None)
+    }
+
+    fn create_inner(
+        &self,
+        path: impl AsRef<Path>,
+        kind: CreateKind,
+        content: Option<&[u8]>,
+    ) -> Result<(), NiteraOperationError> {
+        let request_path =
+            resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
+        let request = NiteraRequest::create(request_path.clone(), kind);
+        self.authorize(&request)?;
+
+        let result = match content {
+            Some(bytes) => std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&request_path)
+                .and_then(|mut file| file.write_all(bytes)),
+            None => std::fs::create_dir(&request_path),
+        };
+
+        result.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                NiteraOperationError::AlreadyExists(request_path)
+            } else {
+                NiteraOperationError::Io(error)
+            }
+        })
     }
 
     /// Executes a process after policy authorization.

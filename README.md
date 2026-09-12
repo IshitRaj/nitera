@@ -12,7 +12,7 @@ This README covers the core API, policy format, and current behavior. For a more
 
 ## What Nitera does
 
-Nitera sits between your application code and `std::fs`, `std::process`, and `std::net`. Every filesystem read, write, or delete, every spawned command, and every outbound connection you route through the `Nitera` API is checked against a policy file before it runs. The policy decides whether the operation is allowed outright, denied outright, or requires an explicit approval at runtime.
+Nitera sits between your application code and `std::fs`, `std::process`, and `std::net`. Every filesystem read, write, delete, or create, every spawned command, and every outbound connection you route through the `Nitera` API is checked against a policy file before it runs. The policy decides whether the operation is allowed outright, denied outright, or requires an explicit approval at runtime.
 
 Nitera has no external dependencies. The `.nitera` file parser and everything else is built on the Rust standard library alone.
 
@@ -46,6 +46,7 @@ fn main() {
 [filesystem]
 allow read ./projects/**
 allow write ./playground/**
+allow create ./playground/**
 ask delete ./playground/**
 
 [process]
@@ -61,7 +62,12 @@ deny host *
 
 Every rule falls into `allow`, `ask`, or `deny`. If a request doesn't match any rule at all, it's denied by default, nothing is implicitly allowed. If more than one rule could match, Nitera checks in this order: `deny` first, then `ask`, then `allow`. The most restrictive match always wins.
 
-**Filesystem** rules are split into `read`, `write`, and `delete`, each with its own independent list.
+**Filesystem** rules are split into `read`, `write`, `delete`, and `create`, each with its own independent list. A `create` rule covers both files and folders: `Nitera::create(path, "text")` creates a new file containing the supplied bytes, while `Nitera::create_dir(path)` creates one new directory level.
+
+```rust
+nitera.create("playground/notes.txt", "some text")?;
+nitera.create_dir("playground/logs")?;
+```
 
 **Process** rules gate on the command name (`allow command cargo, rustc`) and separately require a `scope`, a path glob the working directory must fall inside. Scope is checked first: a command run outside every listed scope is denied even if that exact command is on the allow list.
 
@@ -105,9 +111,11 @@ match nitera.write(path, content) {
 * `Parse` — the `.nitera` file contents could not be parsed.
 
 Every guarded operation (`read`, `write`, `delete`, `execute`, `connect`) returns `NiteraOperationError`, and `Nitera::load` returns `NiteraError`. Both implement `Display` and `std::error::Error`, so they compose with `?` in your own functions.
+
+`Nitera::create` and `Nitera::create_dir` return `NiteraOperationError`. `NiteraOperationError::AlreadyExists(PathBuf)` distinguishes an existing file or directory from a policy denial; policy authorization is always checked first. Other authorization outcomes are returned directly as `NiteraOperationError::Denied`, `NiteraOperationError::Ask`, or `NiteraOperationError::Io`.
 ## Examples
 
-A runnable demo lives in `examples/playground.rs`, reading, writing, and deleting a file against a real `.nitera` policy, with a terminal prompt for anything marked `ask`.
+A runnable demo lives in `examples/playground.rs`, creating files and directories as well as reading, writing, and deleting a file against a real `.nitera` policy, with a terminal prompt for anything marked `ask`.
 
 ```bash
 cargo run --example playground

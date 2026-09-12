@@ -97,6 +97,7 @@ fn parses_all_filesystem_operations() {
         allow read ~/projects/**
         ask write /tmp/**
         deny delete /etc/**
+        allow create ./playground/**
         "#,
     )
     .unwrap();
@@ -114,6 +115,32 @@ fn parses_all_filesystem_operations() {
     assert_eq!(
         policy.filesystem.deny.delete,
         vec![PathPattern("/etc/**".into())]
+    );
+
+    assert_eq!(
+        policy.filesystem.allow.create,
+        vec![PathPattern("./playground/**".into())]
+    );
+}
+
+#[test]
+fn parses_ask_and_deny_create_rules() {
+    let policy = parse(
+        r#"
+        [filesystem]
+        ask create ./review/**
+        deny create ./protected/**
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        policy.filesystem.ask.create,
+        vec![PathPattern("./review/**".into())]
+    );
+    assert_eq!(
+        policy.filesystem.deny.create,
+        vec![PathPattern("./protected/**".into())]
     );
 }
 

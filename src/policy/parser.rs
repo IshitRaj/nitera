@@ -97,6 +97,7 @@ fn parse_filesystem_rule(
         "read" => rules.read.extend(patterns),
         "write" => rules.write.extend(patterns),
         "delete" => rules.delete.extend(patterns),
+        "create" => rules.create.extend(patterns),
         _ => {
             return Err(ParseError::new(
                 line_number,

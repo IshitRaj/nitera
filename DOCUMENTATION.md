@@ -70,10 +70,10 @@ A `.nitera` file is read line by line, 1-indexed for error messages.
 ### `[filesystem]`
 
 ```
-<allow|ask|deny> <read|write|delete> <path>[, <path>...]
+<allow|ask|deny> <read|write|delete|create> <path>[, <path>...]
 ```
 
-`values` is split on commas, each entry trimmed, empty entries dropped, at least one value required. Each becomes a `PathPattern` appended to the matching action/kind list (e.g. `ask` + `write` appends to `filesystem.ask.write`).
+`values` is split on commas, each entry trimmed, empty entries dropped, at least one value required. Each becomes a `PathPattern` appended to the matching action/kind list (e.g. `ask` + `write` appends to `filesystem.ask.write`). A `create` pattern governs both file and directory creation.
 
 ### `[process]`
 
@@ -129,7 +129,7 @@ The practical implication: the security boundary comes entirely from how narrowl
 pub fn load(path: impl AsRef<Path>) -> Result<Self, NiteraError>
 ```
 
-Reads and parses a `.nitera` policy file at `path`. The path must have a `.nitera` extension. The parent directory of `path` is canonicalized and becomes the `Nitera`'s root, the base against which relative patterns in the policy and relative paths passed to `read`, `write`, `delete`, and `execute` are resolved.
+Reads and parses a `.nitera` policy file at `path`. The path must have a `.nitera` extension. The parent directory of `path` is canonicalized and becomes the `Nitera`'s root, the base against which relative patterns in the policy and relative paths passed to `read`, `write`, `delete`, `create`, and `execute` are resolved.
 
 Because the parent directory is canonicalized, it must actually exist on disk.
 
@@ -160,6 +160,22 @@ pub fn delete(&self, path: impl AsRef<Path>) -> Result<(), NiteraOperationError>
 ```
 
 Each resolves `path` against the `Nitera`'s root via `resolve_runtime_path`, evaluates the resolved path against the matching `[filesystem]` list, and only then performs the real `std::fs` call, using that same resolved path for both the check and the actual operation.
+
+### `Nitera::create`
+
+```rust
+pub fn create(&self, path: impl AsRef<Path>, content: impl AsRef<[u8]>) -> Result<(), NiteraOperationError>
+pub fn create_dir(&self, path: impl AsRef<Path>) -> Result<(), NiteraOperationError>
+```
+
+Both methods resolve `path` against the `Nitera` root and authorize it against the same `[filesystem]` `create` rules before touching the filesystem. `create` accepts any `AsRef<[u8]>` input, so strings and byte containers work naturally, and creates a new file through `OpenOptions::new().write(true).create_new(true)`. `create_dir` creates exactly one directory level with `std::fs::create_dir`.
+
+```rust
+nitera.create("playground/notes.txt", "some text")?;
+nitera.create_dir("playground/logs")?;
+```
+
+Both forms return `NiteraOperationError::AlreadyExists(path)` when their target already exists, only after policy authorization has succeeded. `create_dir` returns the underlying `Io` error if the parent directory does not exist. Policy denials and unresolved `ask` requests are reported directly as `NiteraOperationError::Denied` and `NiteraOperationError::Ask(...)`.
 
 ### `Nitera::execute`
 
@@ -216,6 +232,10 @@ impl std::fmt::Display for NiteraRequest {
             (Operation::Read, Target::Path(path)) => write!(f, "read {}", path.display()),
             (Operation::Write, Target::Path(path)) => write!(f, "write {}", path.display()),
             (Operation::Delete, Target::Path(path)) => write!(f, "delete {}", path.display()),
+            (Operation::Create, Target::Create { path, kind }) => match kind {
+                CreateKind::File => write!(f, "Create file {}", path.display()),
+                CreateKind::Directory => write!(f, "Create directory {}", path.display()),
+            },
             (Operation::Execute, Target::Process { command, args, cwd }) => {
                 if args.is_empty() {
                     write!(f, "run `{command}` in {}", cwd.display())
@@ -231,7 +251,7 @@ impl std::fmt::Display for NiteraRequest {
 ```
 
 It formats per operation. For example, a request prints as
-`read /home/user/project/playground/test.txt`,
+`read /home/user/project/playground/test.txt`, `Create directory /home/user/project/playground/logs`,
 ``run `cargo test` in /home/user/project``, or
 `connect to 127.0.0.1:8080`.
 
@@ -250,10 +270,11 @@ pub enum NiteraError {
     InvalidPolicyFile,
     Io(std::io::Error),
     Parse(ParseError),
+    Operation(NiteraOperationError),
 }
 ```
 
-Returned by `Nitera::load`. Implements `Display` and `std::error::Error`. `Io` and `Parse` expose their underlying errors through `source()`, while `InvalidPolicyFile` indicates that the supplied path is not a `.nitera` policy file.
+Returned by `Nitera::load`. Implements `Display` and `std::error::Error`. `Io`, `Parse`, and `Operation` expose their wrapped errors through `source()`. `InvalidPolicyFile` indicates that the supplied path is not a `.nitera` policy file.
 
 ### `NiteraOperationError`
 
@@ -262,14 +283,16 @@ pub enum NiteraOperationError {
     Denied,
     Ask(NiteraRequest),
     Io(std::io::Error),
+    AlreadyExists(PathBuf),
 }
 ```
 
-Returned by `read`, `write`, `delete`, `execute`, `connect`.
+Returned by `read`, `write`, `delete`, `create`, `create_dir`, `execute`, and `connect`.
 
 - `Denied`, policy resolved to Deny, or an approval handler returned `ApprovalDecision::Denied`.
 - `Ask(request)`, policy resolved to Ask and no approval handler is registered.
 - `Io(err)`, the policy check passed but the underlying `std::fs`/`std::process`/`std::net` call itself failed.
+- `AlreadyExists(path)`, a create request found a pre-existing file or directory after policy authorization succeeded.
 
 Implements `Display` (a per-variant message, including a pointer to `.with_approval_handler(...)` for `Ask`) and `std::error::Error` (exposing `Io`'s inner error through `source()`).
 

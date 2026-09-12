@@ -1,5 +1,6 @@
 [filesystem]
 allow read ./playground/*
+allow create ./playground/*
 ask write ./playground/*
 deny delete ./playground/*
 

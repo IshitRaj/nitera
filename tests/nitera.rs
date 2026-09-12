@@ -1,5 +1,5 @@
 use nitera::engine::{Decision, NiteraRequest, Operation};
-use nitera::{Nitera, NiteraError, NiteraOperationError};
+use nitera::{ApprovalDecision, Nitera, NiteraError, NiteraOperationError};
 
 use std::fs;
 
@@ -25,6 +25,17 @@ fn unique_path(tag: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("nitera-{tag}-{}-{n}-{nanos}", std::process::id()))
+}
+
+fn nitera_with_create_rule(action: &str, target: &std::path::Path) -> (Nitera, std::path::PathBuf) {
+    let policy_path = temp_policy_path();
+    fs::write(
+        &policy_path,
+        format!("[filesystem]\n{action} create {}\n", target.display()),
+    )
+    .unwrap();
+
+    (Nitera::load(&policy_path).unwrap(), policy_path)
 }
 
 #[test]
@@ -1116,4 +1127,163 @@ fn accepts_nitera_policy_file() {
     assert!(Nitera::load(&path).is_ok());
 
     fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn create_allow_rule_creates_a_file_from_str() {
+    let target = unique_path("create-file-allowed.txt");
+    let (nitera, policy_path) = nitera_with_create_rule("allow", &target);
+
+    nitera.create(&target, "created file").unwrap();
+
+    assert_eq!(fs::read(&target).unwrap(), b"created file");
+    fs::remove_file(target).unwrap();
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_allow_rule_creates_a_directory() {
+    let target = unique_path("create-directory-allowed");
+    let (nitera, policy_path) = nitera_with_create_rule("allow", &target);
+
+    nitera.create_dir(&target).unwrap();
+
+    assert!(target.is_dir());
+    fs::remove_dir(target).unwrap();
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_deny_rule_blocks_a_file() {
+    let target = unique_path("create-file-denied.txt");
+    let (nitera, policy_path) = nitera_with_create_rule("deny", &target);
+
+    let result = nitera.create(&target, b"blocked");
+
+    assert!(matches!(result, Err(NiteraOperationError::Denied)));
+    assert!(!target.exists());
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_deny_rule_blocks_a_directory() {
+    let target = unique_path("create-directory-denied");
+    let (nitera, policy_path) = nitera_with_create_rule("deny", &target);
+
+    let result = nitera.create_dir(&target);
+
+    assert!(matches!(result, Err(NiteraOperationError::Denied)));
+    assert!(!target.exists());
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_ask_approved_creates_a_file_and_labels_the_request() {
+    let target = unique_path("create-file-asked.txt");
+    let expected_request = format!("Create file {}", target.display());
+    let (nitera, policy_path) = nitera_with_create_rule("ask", &target);
+    let nitera = nitera.with_approval_handler(move |request: &NiteraRequest| {
+        assert_eq!(request.to_string(), expected_request);
+        ApprovalDecision::Approved
+    });
+
+    nitera.create(&target, b"approved").unwrap();
+
+    assert_eq!(fs::read(&target).unwrap(), b"approved");
+    fs::remove_file(target).unwrap();
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_ask_approved_creates_a_directory_and_labels_the_request() {
+    let target = unique_path("create-directory-asked");
+    let expected_request = format!("Create directory {}", target.display());
+    let (nitera, policy_path) = nitera_with_create_rule("ask", &target);
+    let nitera = nitera.with_approval_handler(move |request: &NiteraRequest| {
+        assert_eq!(request.to_string(), expected_request);
+        ApprovalDecision::Approved
+    });
+
+    nitera.create_dir(&target).unwrap();
+
+    assert!(target.is_dir());
+    fs::remove_dir(target).unwrap();
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_ask_denied_blocks_a_file() {
+    let target = unique_path("create-file-ask-denied.txt");
+    let (nitera, policy_path) = nitera_with_create_rule("ask", &target);
+    let nitera = nitera.with_approval_handler(|_: &NiteraRequest| ApprovalDecision::Denied);
+
+    let result = nitera.create(&target, b"blocked");
+
+    assert!(matches!(result, Err(NiteraOperationError::Denied)));
+    assert!(!target.exists());
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_ask_denied_blocks_a_directory() {
+    let target = unique_path("create-directory-ask-denied");
+    let (nitera, policy_path) = nitera_with_create_rule("ask", &target);
+    let nitera = nitera.with_approval_handler(|_: &NiteraRequest| ApprovalDecision::Denied);
+
+    let result = nitera.create_dir(&target);
+
+    assert!(matches!(result, Err(NiteraOperationError::Denied)));
+    assert!(!target.exists());
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_reports_already_exists_for_an_existing_file_after_authorization() {
+    let target = unique_path("create-existing-file.txt");
+    fs::write(&target, b"already here").unwrap();
+    let (nitera, policy_path) = nitera_with_create_rule("allow", &target);
+
+    let result = nitera.create(&target, b"new contents");
+
+    assert!(matches!(result, Err(NiteraOperationError::AlreadyExists(path)) if path == target));
+    fs::remove_file(target).unwrap();
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_denial_takes_priority_over_an_existing_target() {
+    let target = unique_path("create-denied-existing-file.txt");
+    fs::write(&target, b"already here").unwrap();
+    let (nitera, policy_path) = nitera_with_create_rule("deny", &target);
+
+    let result = nitera.create(&target, b"new contents");
+
+    assert!(matches!(result, Err(NiteraOperationError::Denied)));
+    fs::remove_file(target).unwrap();
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_reports_already_exists_for_an_existing_directory_after_authorization() {
+    let target = unique_path("create-existing-directory");
+    fs::create_dir(&target).unwrap();
+    let (nitera, policy_path) = nitera_with_create_rule("allow", &target);
+
+    let result = nitera.create_dir(&target);
+
+    assert!(matches!(result, Err(NiteraOperationError::AlreadyExists(path)) if path == target));
+    fs::remove_dir(target).unwrap();
+    fs::remove_file(policy_path).unwrap();
+}
+
+#[test]
+fn create_accepts_empty_content() {
+    let target = unique_path("create-empty-file.txt");
+    let (nitera, policy_path) = nitera_with_create_rule("allow", &target);
+
+    nitera.create(&target, "").unwrap();
+
+    assert!(fs::read(&target).unwrap().is_empty());
+    fs::remove_file(target).unwrap();
+    fs::remove_file(policy_path).unwrap();
 }
