@@ -1,5 +1,5 @@
 use super::model::{HostPattern, PathPattern, Policy};
-use crate::engine::{Decision, FenceRequest, Operation, Resource, Target};
+use crate::engine::{Decision, NiteraRequest, Operation, Resource, Target};
 use std::path::Path;
 
 impl Policy {
@@ -46,7 +46,7 @@ impl Policy {
         Decision::Deny
     }
 
-    pub fn evaluate(&self, request: &FenceRequest, base: &Path) -> Decision {
+    pub fn evaluate(&self, request: &NiteraRequest, base: &Path) -> Decision {
         match (&request.resource, &request.operation, &request.target) {
             (Resource::Filesystem, Operation::Read, Target::Path(path)) => Self::evaluate_path(
                 path,

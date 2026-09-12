@@ -2,9 +2,9 @@
 mod tests {
     use std::path::Path;
 
-    use fence::engine::{Decision, FenceRequest, Operation};
-    use fence::policy::Policy;
-    use fence::policy::model::{
+    use nitera::engine::{Decision, NiteraRequest, Operation};
+    use nitera::policy::Policy;
+    use nitera::policy::model::{
         FilesystemPolicy, FilesystemRules, HostPattern, NetworkPolicy, PathPattern, ProcessPolicy,
     };
 
@@ -26,7 +26,7 @@ mod tests {
     fn allowed_read_returns_allow() {
         let policy = test_policy();
 
-        let request = FenceRequest::filesystem(Operation::Read, "/home/user/project/file.txt");
+        let request = NiteraRequest::filesystem(Operation::Read, "/home/user/project/file.txt");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Allow);
     }
@@ -35,7 +35,7 @@ mod tests {
     fn unknown_read_returns_deny() {
         let policy = test_policy();
 
-        let request = FenceRequest::filesystem(Operation::Read, "/etc/passwd");
+        let request = NiteraRequest::filesystem(Operation::Read, "/etc/passwd");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -56,7 +56,7 @@ mod tests {
             network: NetworkPolicy::default(),
         };
 
-        let request = FenceRequest::filesystem(
+        let request = NiteraRequest::filesystem(
             Operation::Read,
             format!("{home}/projects/myapp/src/main.rs"),
         );
@@ -78,7 +78,7 @@ mod tests {
             network: NetworkPolicy::default(),
         };
 
-        let request = FenceRequest::filesystem(Operation::Write, "/tmp/test.txt");
+        let request = NiteraRequest::filesystem(Operation::Write, "/tmp/test.txt");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Allow);
     }
@@ -101,7 +101,7 @@ mod tests {
             network: NetworkPolicy::default(),
         };
 
-        let request = FenceRequest::filesystem(Operation::Read, "/tmp/secret/password.txt");
+        let request = NiteraRequest::filesystem(Operation::Read, "/tmp/secret/password.txt");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -124,7 +124,7 @@ mod tests {
             network: NetworkPolicy::default(),
         };
 
-        let request = FenceRequest::filesystem(Operation::Read, "/tmp/important/file.txt");
+        let request = NiteraRequest::filesystem(Operation::Read, "/tmp/important/file.txt");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Ask);
     }
@@ -143,7 +143,7 @@ mod tests {
             network: NetworkPolicy::default(),
         };
 
-        let request = FenceRequest::filesystem(Operation::Delete, "/tmp/test.txt");
+        let request = NiteraRequest::filesystem(Operation::Delete, "/tmp/test.txt");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Allow);
     }
@@ -157,7 +157,7 @@ mod tests {
             network: NetworkPolicy::default(),
         };
 
-        let request = FenceRequest::filesystem(Operation::Write, "/anything/at/all.txt");
+        let request = NiteraRequest::filesystem(Operation::Write, "/anything/at/all.txt");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -173,7 +173,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::process("cargo", ["test"], "/projects/myapp");
+        let request = NiteraRequest::process("cargo", ["test"], "/projects/myapp");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Allow);
     }
@@ -189,7 +189,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::process("python", ["script.py"], "/projects/myapp");
+        let request = NiteraRequest::process("python", ["script.py"], "/projects/myapp");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -205,7 +205,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::process("bash", [""], "/projects/myapp");
+        let request = NiteraRequest::process("bash", [""], "/projects/myapp");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -221,7 +221,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::process("rm", ["file.txt"], "/projects/myapp");
+        let request = NiteraRequest::process("rm", ["file.txt"], "/projects/myapp");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Ask);
     }
@@ -237,7 +237,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::process("cargo", ["test"], "/tmp");
+        let request = NiteraRequest::process("cargo", ["test"], "/tmp");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -254,7 +254,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::process("cargo", ["test"], "/projects/myapp");
+        let request = NiteraRequest::process("cargo", ["test"], "/projects/myapp");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -271,7 +271,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::process("cargo", ["test"], "/projects/myapp");
+        let request = NiteraRequest::process("cargo", ["test"], "/projects/myapp");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Ask);
     }
@@ -286,7 +286,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::process("cargo", ["test"], "/projects/myapp");
+        let request = NiteraRequest::process("cargo", ["test"], "/projects/myapp");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -301,7 +301,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("api.github.com", 443);
+        let request = NiteraRequest::network("api.github.com", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Allow);
     }
@@ -316,7 +316,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("example.com", 443);
+        let request = NiteraRequest::network("example.com", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -331,7 +331,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("api.crates.io", 443);
+        let request = NiteraRequest::network("api.crates.io", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Allow);
     }
@@ -346,7 +346,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("crates.io", 443);
+        let request = NiteraRequest::network("crates.io", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -361,7 +361,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("evil.com", 443);
+        let request = NiteraRequest::network("evil.com", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -377,7 +377,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("api.example.com", 443);
+        let request = NiteraRequest::network("api.example.com", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -393,7 +393,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("api.example.com", 443);
+        let request = NiteraRequest::network("api.example.com", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Ask);
     }
@@ -408,7 +408,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("example.com", 443);
+        let request = NiteraRequest::network("example.com", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -424,7 +424,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("api.github.com", 443);
+        let request = NiteraRequest::network("api.github.com", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }
@@ -436,7 +436,7 @@ mod tests {
             ..Default::default()
         };
 
-        let request = FenceRequest::network("example.com", 443);
+        let request = NiteraRequest::network("example.com", 443);
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
     }

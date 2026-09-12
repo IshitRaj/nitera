@@ -33,13 +33,13 @@ pub enum Target {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FenceRequest {
+pub struct NiteraRequest {
     pub resource: Resource,
     pub operation: Operation,
     pub target: Target,
 }
 
-impl std::fmt::Display for FenceRequest {
+impl std::fmt::Display for NiteraRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (&self.operation, &self.target) {
             (Operation::Read, Target::Path(path)) => write!(f, "read {}", path.display()),
@@ -60,7 +60,7 @@ impl std::fmt::Display for FenceRequest {
     }
 }
 
-impl FenceRequest {
+impl NiteraRequest {
     pub fn filesystem(operation: Operation, path: impl Into<PathBuf>) -> Self {
         Self {
             resource: Resource::Filesystem,

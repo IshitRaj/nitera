@@ -1,20 +1,20 @@
-# Fence
+# Nitera
 
 A zero-dependency policy engine for filesystem, process, and network access in Rust.
 
 ## Status
 
-v0.1.0. Built as a 72-hour hackathon project. The allow/ask/deny model, the `.fence` file format, and the approval flow are implemented and tested.
+v0.1.0. Built as a 72-hour hackathon project. The allow/ask/deny model, the `.nitera` file format, and the approval flow are implemented and tested.
 
 ## Documentation
 
 This README covers the core API, policy format, and current behavior. For a more detailed reference covering the public API, crate structure, parser, policy evaluation, path handling, and testing, see [`DOCUMENTATION.md`](DOCUMENTATION.md).
 
-## What Fence does
+## What Nitera does
 
-Fence sits between your application code and `std::fs`, `std::process`, and `std::net`. Every filesystem read, write, or delete, every spawned command, and every outbound connection you route through the `Fence` API is checked against a policy file before it runs. The policy decides whether the operation is allowed outright, denied outright, or requires an explicit approval at runtime.
+Nitera sits between your application code and `std::fs`, `std::process`, and `std::net`. Every filesystem read, write, or delete, every spawned command, and every outbound connection you route through the `Nitera` API is checked against a policy file before it runs. The policy decides whether the operation is allowed outright, denied outright, or requires an explicit approval at runtime.
 
-Fence has no external dependencies. The `.fence` file parser and everything else is built on the Rust standard library alone.
+Nitera has no external dependencies. The `.nitera` file parser and everything else is built on the Rust standard library alone.
 
 ## Installation
 
@@ -22,25 +22,25 @@ Not yet published to crates.io. Point Cargo at a path or git dependency until it
 
 ```toml
 [dependencies]
-fence = { path = "../fence" }
+nitera = { path = "../nitera" }
 ```
 
 ## Quick start
 
 ```rust
-use fence::Fence;
+use nitera::Nitera;
 
 fn main() {
-    let fence = Fence::load(".fence").expect("failed to load policy");
+    let nitera = Nitera::load(".nitera").expect("failed to load policy");
 
-    fence.write("output/report.txt", b"hello").expect("write failed");
-    let content = fence.read("output/report.txt").expect("read failed");
+    nitera.write("output/report.txt", b"hello").expect("write failed");
+    let content = nitera.read("output/report.txt").expect("read failed");
 
     println!("{}", String::from_utf8_lossy(&content));
 }
 ```
 
-## Policy files (`.fence`)
+## Policy files (`.nitera`)
 
 ```text
 [filesystem]
@@ -59,7 +59,7 @@ ask host *.internal.example.com
 deny host *
 ```
 
-Every rule falls into `allow`, `ask`, or `deny`. If a request doesn't match any rule at all, it's denied by default, nothing is implicitly allowed. If more than one rule could match, Fence checks in this order: `deny` first, then `ask`, then `allow`. The most restrictive match always wins.
+Every rule falls into `allow`, `ask`, or `deny`. If a request doesn't match any rule at all, it's denied by default, nothing is implicitly allowed. If more than one rule could match, Nitera checks in this order: `deny` first, then `ask`, then `allow`. The most restrictive match always wins.
 
 **Filesystem** rules are split into `read`, `write`, and `delete`, each with its own independent list.
 
@@ -74,9 +74,9 @@ Paths can be relative, absolute, or `~`-prefixed, and support `*` (single segmen
 A rule marked `ask` doesn't resolve to allow or deny on its own, it needs a decision made at runtime by an approval handler.
 
 ```rust
-use fence::{ApprovalDecision, Fence};
+use nitera::{ApprovalDecision, Nitera};
 
-let fence = Fence::load(".fence")
+let nitera = Nitera::load(".nitera")
     .expect("failed to load policy")
     .with_approval_handler(|request| {
         // show the request to a human, a log, a prompt, whatever fits
@@ -87,10 +87,10 @@ let fence = Fence::load(".fence")
 
 `ApprovalHandler` is a plain trait, so a closure or a struct with its own state both work. The handler is only ever consulted for a rule explicitly marked `ask`, it's never given the chance to override a `deny`, and whatever it approves is exactly the operation that was evaluated, nothing about the request can be substituted on the way through.
 
-If no handler is registered, an operation that hits an `ask` rule returns `FenceOperationError::Ask`, carrying the request that needed a decision, so the failure is loud and specific rather than silently doing nothing:
+If no handler is registered, an operation that hits an `ask` rule returns `NiteraOperationError::Ask`, carrying the request that needed a decision, so the failure is loud and specific rather than silently doing nothing:
 
 ```rust
-match fence.write(path, content) {
+match nitera.write(path, content) {
     Ok(()) => println!("write succeeded"),
     Err(err) => println!("{err}"), // e.g. "policy marks `...` as ask, but no approval handler is configured..."
 }
@@ -98,16 +98,16 @@ match fence.write(path, content) {
 
 ## Errors
 
-`Fence::load` returns `FenceError`:
+`Nitera::load` returns `NiteraError`:
 
-* `InvalidPolicyFile` — the supplied path does not have a `.fence` extension.
+* `InvalidPolicyFile` — the supplied path does not have a `.nitera` extension.
 * `Io` — the policy file could not be read, or its parent directory could not be canonicalized.
-* `Parse` — the `.fence` file contents could not be parsed.
+* `Parse` — the `.nitera` file contents could not be parsed.
 
-Every guarded operation (`read`, `write`, `delete`, `execute`, `connect`) returns `FenceOperationError`, and `Fence::load` returns `FenceError`. Both implement `Display` and `std::error::Error`, so they compose with `?` in your own functions.
+Every guarded operation (`read`, `write`, `delete`, `execute`, `connect`) returns `NiteraOperationError`, and `Nitera::load` returns `NiteraError`. Both implement `Display` and `std::error::Error`, so they compose with `?` in your own functions.
 ## Examples
 
-A runnable demo lives in `examples/playground.rs`, reading, writing, and deleting a file against a real `.fence` policy, with a terminal prompt for anything marked `ask`.
+A runnable demo lives in `examples/playground.rs`, reading, writing, and deleting a file against a real `.nitera` policy, with a terminal prompt for anything marked `ask`.
 
 ```bash
 cargo run --example playground
@@ -122,6 +122,6 @@ cargo test
 
 ## Current limits
 
-Fence is a library-level enforcement API. It controls operations performed through the `Fence` API; it does not prevent an application from directly using `std::fs`, `std::process`, networking APIs, or other libraries to bypass Fence.
+Nitera is a library-level enforcement API. It controls operations performed through the `Nitera` API; it does not prevent an application from directly using `std::fs`, `std::process`, networking APIs, or other libraries to bypass Nitera.
 
 Path authorization is currently based on normalized paths and patterns rather than OS-level sandboxing. Symlink resolution is not currently handled as a separate security boundary and may be addressed in a future version.

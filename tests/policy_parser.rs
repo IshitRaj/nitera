@@ -1,5 +1,5 @@
-use fence::policy::model::{HostPattern, PathPattern, Policy};
-use fence::policy::parser::parse;
+use nitera::policy::model::{HostPattern, PathPattern, Policy};
+use nitera::policy::parser::parse;
 
 #[test]
 fn parses_empty_policy() {
@@ -25,7 +25,7 @@ fn parses_sections() {
 #[test]
 fn ignores_blank_lines_and_comments() {
     let input = r#"
-        # Fence policy
+        # Nitera policy
 
         [filesystem]
 

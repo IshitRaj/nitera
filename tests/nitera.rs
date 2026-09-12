@@ -1,5 +1,5 @@
-use fence::engine::{Decision, FenceRequest, Operation};
-use fence::{Fence, FenceError, FenceOperationError};
+use nitera::engine::{Decision, NiteraRequest, Operation};
+use nitera::{Nitera, NiteraError, NiteraOperationError};
 
 use std::fs;
 
@@ -7,7 +7,7 @@ fn temp_policy_path() -> std::path::PathBuf {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "fence-policy-{}-{}-{}.fence",
+        "nitera-policy-{}-{}-{}.nitera",
         std::process::id(),
         n,
         std::time::SystemTime::now()
@@ -24,7 +24,7 @@ fn unique_path(tag: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("fence-{tag}-{}-{n}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!("nitera-{tag}-{}-{n}-{nanos}", std::process::id()))
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn loads_valid_policy() {
     )
     .unwrap();
 
-    let result = Fence::load(&path);
+    let result = Nitera::load(&path);
 
     fs::remove_file(&path).unwrap();
 
@@ -57,7 +57,7 @@ fn loads_valid_policy() {
 fn rejects_missing_policy_file() {
     let path = temp_policy_path();
 
-    let result = Fence::load(&path);
+    let result = Nitera::load(&path);
 
     assert!(result.is_err());
 }
@@ -75,7 +75,7 @@ fn rejects_invalid_policy() {
     )
     .unwrap();
 
-    let result = Fence::load(&path);
+    let result = Nitera::load(&path);
 
     fs::remove_file(&path).unwrap();
 
@@ -86,8 +86,8 @@ fn rejects_invalid_policy() {
 fn reports_missing_file_error() {
     let path = temp_policy_path();
 
-    match Fence::load(&path) {
-        Err(fence::FenceError::Io(error)) => {
+    match Nitera::load(&path) {
+        Err(nitera::NiteraError::Io(error)) => {
             assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         }
         _ => panic!("expected an IO error"),
@@ -108,8 +108,8 @@ fn reports_parse_error_line_and_message() {
     )
     .unwrap();
 
-    match Fence::load(&path) {
-        Err(fence::FenceError::Parse(error)) => {
+    match Nitera::load(&path) {
+        Err(nitera::NiteraError::Parse(error)) => {
             assert_eq!(error.line, 4);
             assert_eq!(error.message, "unknown action: invalid");
         }
@@ -132,11 +132,11 @@ fn check_allows_allowed_request() {
     )
     .unwrap();
 
-    let fence = Fence::load(&path).unwrap();
+    let nitera = Nitera::load(&path).unwrap();
 
-    let request = FenceRequest::filesystem(Operation::Read, "/tmp/test.txt");
+    let request = NiteraRequest::filesystem(Operation::Read, "/tmp/test.txt");
 
-    assert_eq!(fence.check(&request), Decision::Allow);
+    assert_eq!(nitera.check(&request), Decision::Allow);
 
     fs::remove_file(&path).unwrap();
 }
@@ -154,11 +154,11 @@ fn check_denies_unmatched_request() {
     )
     .unwrap();
 
-    let fence = Fence::load(&path).unwrap();
+    let nitera = Nitera::load(&path).unwrap();
 
-    let request = FenceRequest::filesystem(Operation::Read, "/etc/passwd");
+    let request = NiteraRequest::filesystem(Operation::Read, "/etc/passwd");
 
-    assert_eq!(fence.check(&request), Decision::Deny);
+    assert_eq!(nitera.check(&request), Decision::Deny);
 
     fs::remove_file(&path).unwrap();
 }
@@ -176,11 +176,11 @@ fn check_returns_ask() {
     )
     .unwrap();
 
-    let fence = Fence::load(&path).unwrap();
+    let nitera = Nitera::load(&path).unwrap();
 
-    let request = FenceRequest::filesystem(Operation::Read, "/tmp/important/data.txt");
+    let request = NiteraRequest::filesystem(Operation::Read, "/tmp/important/data.txt");
 
-    assert_eq!(fence.check(&request), Decision::Ask);
+    assert_eq!(nitera.check(&request), Decision::Ask);
 
     fs::remove_file(&path).unwrap();
 }
@@ -203,12 +203,12 @@ fn read_allows_allowed_path() {
     )
     .unwrap();
 
-    // Write the target file directly, bypassing Fence, so this test
+    // Write the target file directly, bypassing Nitera, so this test
     // only exercises the read path, not write.
     fs::write(&file_path, b"hello from disk").unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    let contents = fence.read(&file_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+    let contents = nitera.read(&file_path).unwrap();
 
     assert_eq!(contents, b"hello from disk");
 
@@ -227,17 +227,17 @@ fn read_denies_disallowed_path() {
         &policy_path,
         r#"
         [filesystem]
-        allow read /nonexistent-fence-scope/**
+        allow read /nonexistent-nitera-scope/**
         "#,
     )
     .unwrap();
 
     fs::write(&file_path, b"should not be readable").unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    let result = fence.read(&file_path);
+    let nitera = Nitera::load(&policy_path).unwrap();
+    let result = nitera.read(&file_path);
 
-    assert!(matches!(result, Err(FenceOperationError::Denied)));
+    assert!(matches!(result, Err(NiteraOperationError::Denied)));
 
     let _ = fs::remove_file(&policy_path);
     let _ = fs::remove_file(&file_path);
@@ -263,10 +263,10 @@ fn read_returns_ask_for_ask_rule() {
 
     fs::write(&file_path, b"needs confirmation").unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    let result = fence.read(&file_path);
+    let nitera = Nitera::load(&policy_path).unwrap();
+    let result = nitera.read(&file_path);
 
-    assert!(matches!(result, Err(FenceOperationError::Ask(_))));
+    assert!(matches!(result, Err(NiteraOperationError::Ask(_))));
 
     let _ = fs::remove_file(&policy_path);
     let _ = fs::remove_file(&file_path);
@@ -291,10 +291,10 @@ fn read_propagates_io_error_for_missing_file() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    let result = fence.read(&file_path);
+    let nitera = Nitera::load(&policy_path).unwrap();
+    let result = nitera.read(&file_path);
 
-    assert!(matches!(result, Err(FenceOperationError::Io(_))));
+    assert!(matches!(result, Err(NiteraOperationError::Io(_))));
 
     let _ = fs::remove_file(&policy_path);
 }
@@ -303,7 +303,7 @@ fn read_propagates_io_error_for_missing_file() {
 fn write_allows_allowed_path() {
     let policy_path = temp_policy_path();
     let dir = std::env::temp_dir();
-    let file_path = dir.join("fence-write-test.txt");
+    let file_path = dir.join("nitera-write-test.txt");
 
     fs::write(
         &policy_path,
@@ -317,9 +317,9 @@ fn write_allows_allowed_path() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    fence.write(&file_path, "hello from fence").unwrap();
-    assert_eq!(fs::read_to_string(&file_path).unwrap(), "hello from fence");
+    let nitera = Nitera::load(&policy_path).unwrap();
+    nitera.write(&file_path, "hello from nitera").unwrap();
+    assert_eq!(fs::read_to_string(&file_path).unwrap(), "hello from nitera");
 
     fs::remove_file(policy_path).unwrap();
     fs::remove_file(file_path).unwrap();
@@ -329,7 +329,7 @@ fn write_allows_allowed_path() {
 fn write_denies_disallowed_path() {
     let policy_path = temp_policy_path();
     let dir = std::env::temp_dir();
-    let file_path = dir.join("fence-write-denied.txt");
+    let file_path = dir.join("nitera-write-denied.txt");
 
     fs::write(
         &policy_path,
@@ -343,10 +343,10 @@ fn write_denies_disallowed_path() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    let result = fence.write(&file_path, "should not be written");
+    let nitera = Nitera::load(&policy_path).unwrap();
+    let result = nitera.write(&file_path, "should not be written");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
     assert!(!file_path.exists());
 
     fs::remove_file(policy_path).unwrap();
@@ -356,7 +356,7 @@ fn write_denies_disallowed_path() {
 fn write_returns_ask_for_ask_rule() {
     let policy_path = temp_policy_path();
     let dir = std::env::temp_dir();
-    let file_path = dir.join("fence-write-ask.txt");
+    let file_path = dir.join("nitera-write-ask.txt");
 
     fs::write(
         &policy_path,
@@ -370,11 +370,11 @@ fn write_returns_ask_for_ask_rule() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.write(&file_path, "should not be written");
+    let result = nitera.write(&file_path, "should not be written");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Ask(_))));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Ask(_))));
 
     assert!(!file_path.exists());
 
@@ -386,7 +386,7 @@ fn write_returns_io_error_when_parent_does_not_exist() {
     let policy_path = temp_policy_path();
     let dir = std::env::temp_dir();
 
-    let missing_dir = dir.join("fence-missing-parent");
+    let missing_dir = dir.join("nitera-missing-parent");
     let file_path = missing_dir.join("file.txt");
 
     fs::write(
@@ -401,11 +401,11 @@ fn write_returns_io_error_when_parent_does_not_exist() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.write(&file_path, "hello");
+    let result = nitera.write(&file_path, "hello");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Io(_))));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Io(_))));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -414,7 +414,7 @@ fn write_returns_io_error_when_parent_does_not_exist() {
 fn delete_allows_allowed_path() {
     let policy_path = temp_policy_path();
     let dir = std::env::temp_dir();
-    let file_path = dir.join("fence-delete-test.txt");
+    let file_path = dir.join("nitera-delete-test.txt");
 
     fs::write(&file_path, "delete me").unwrap();
 
@@ -430,8 +430,8 @@ fn delete_allows_allowed_path() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    fence.delete(&file_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+    nitera.delete(&file_path).unwrap();
 
     assert!(!file_path.exists());
 
@@ -442,7 +442,7 @@ fn delete_allows_allowed_path() {
 fn delete_denies_disallowed_path() {
     let policy_path = temp_policy_path();
     let dir = std::env::temp_dir();
-    let file_path = dir.join("fence-delete-denied.txt");
+    let file_path = dir.join("nitera-delete-denied.txt");
 
     fs::write(&file_path, "keep me").unwrap();
 
@@ -458,10 +458,10 @@ fn delete_denies_disallowed_path() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    let result = fence.delete(&file_path);
+    let nitera = Nitera::load(&policy_path).unwrap();
+    let result = nitera.delete(&file_path);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
     assert!(file_path.exists());
 
     fs::remove_file(policy_path).unwrap();
@@ -472,7 +472,7 @@ fn delete_denies_disallowed_path() {
 fn delete_returns_ask_for_ask_rule() {
     let policy_path = temp_policy_path();
     let dir = std::env::temp_dir();
-    let file_path = dir.join("fence-delete-ask.txt");
+    let file_path = dir.join("nitera-delete-ask.txt");
 
     fs::write(&file_path, "keep me").unwrap();
 
@@ -488,10 +488,10 @@ fn delete_returns_ask_for_ask_rule() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    let result = fence.delete(&file_path);
+    let nitera = Nitera::load(&policy_path).unwrap();
+    let result = nitera.delete(&file_path);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Ask(_))));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Ask(_))));
     assert!(file_path.exists());
 
     fs::remove_file(policy_path).unwrap();
@@ -502,7 +502,7 @@ fn delete_returns_ask_for_ask_rule() {
 fn delete_returns_io_error_when_file_does_not_exist() {
     let policy_path = temp_policy_path();
     let dir = std::env::temp_dir();
-    let file_path = dir.join("fence-delete-missing.txt");
+    let file_path = dir.join("nitera-delete-missing.txt");
 
     fs::write(
         &policy_path,
@@ -516,10 +516,10 @@ fn delete_returns_io_error_when_file_does_not_exist() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
-    let result = fence.delete(&file_path);
+    let nitera = Nitera::load(&policy_path).unwrap();
+    let result = nitera.delete(&file_path);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Io(_))));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Io(_))));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -538,9 +538,9 @@ fn execute_allows_allowed_command() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let output = fence.execute("echo", ["hello"], ".").unwrap();
+    let output = nitera.execute("echo", ["hello"], ".").unwrap();
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
@@ -562,11 +562,11 @@ fn execute_denies_unknown_command() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.execute("sh", Vec::<&str>::new(), ".");
+    let result = nitera.execute("sh", Vec::<&str>::new(), ".");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -585,11 +585,11 @@ fn execute_returns_ask_for_ask_rule() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.execute("echo", ["hello"], ".");
+    let result = nitera.execute("echo", ["hello"], ".");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Ask(_))));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Ask(_))));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -608,11 +608,11 @@ fn execute_denies_command_outside_scope() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.execute("echo", ["hello"], "./");
+    let result = nitera.execute("echo", ["hello"], "./");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -640,9 +640,9 @@ fn connect_allows_allowed_host() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    fence.connect("127.0.0.1", port).unwrap();
+    nitera.connect("127.0.0.1", port).unwrap();
 
     handle.join().unwrap();
     fs::remove_file(policy_path).unwrap();
@@ -661,11 +661,11 @@ fn connect_denies_denied_host() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.connect("127.0.0.1", 1);
+    let result = nitera.connect("127.0.0.1", 1);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -683,11 +683,11 @@ fn connect_returns_ask_for_ask_rule() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.connect("127.0.0.1", 12345);
+    let result = nitera.connect("127.0.0.1", 12345);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Ask(_))));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Ask(_))));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -706,11 +706,11 @@ fn connect_deny_overrides_allow() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.connect("127.0.0.1", 12345);
+    let result = nitera.connect("127.0.0.1", 12345);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -728,11 +728,11 @@ fn connect_unknown_host_is_denied() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path).unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
 
-    let result = fence.connect("example.com", 443);
+    let result = nitera.connect("example.com", 443);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -757,11 +757,11 @@ fn read_ask_approved_performs_read() {
 
     fs::write(&file_path, b"needs confirmation").unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Approved);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Approved);
 
-    let result = fence.read(&file_path);
+    let result = nitera.read(&file_path);
 
     assert_eq!(result.unwrap(), b"needs confirmation");
 
@@ -789,13 +789,13 @@ fn read_ask_denied_returns_denied() {
 
     fs::write(&file_path, b"needs confirmation").unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Denied);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Denied);
 
-    let result = fence.read(&file_path);
+    let result = nitera.read(&file_path);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
 
     let _ = fs::remove_file(&policy_path);
     let _ = fs::remove_file(&file_path);
@@ -819,11 +819,11 @@ fn write_ask_approved_performs_write() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Approved);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Approved);
 
-    fence.write(&file_path, b"hello").unwrap();
+    nitera.write(&file_path, b"hello").unwrap();
 
     assert_eq!(fs::read(&file_path).unwrap(), b"hello");
 
@@ -849,13 +849,13 @@ fn write_ask_denied_returns_denied() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Denied);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Denied);
 
-    let result = fence.write(&file_path, b"hello");
+    let result = nitera.write(&file_path, b"hello");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
     assert!(!file_path.exists());
 
     let _ = fs::remove_file(&policy_path);
@@ -881,11 +881,11 @@ fn delete_ask_approved_performs_delete() {
 
     fs::write(&file_path, b"soon gone").unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Approved);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Approved);
 
-    fence.delete(&file_path).unwrap();
+    nitera.delete(&file_path).unwrap();
 
     assert!(!file_path.exists());
 
@@ -912,13 +912,13 @@ fn delete_ask_denied_returns_denied() {
 
     fs::write(&file_path, b"stays put").unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Denied);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Denied);
 
-    let result = fence.delete(&file_path);
+    let result = nitera.delete(&file_path);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
     assert!(file_path.exists());
 
     let _ = fs::remove_file(&policy_path);
@@ -939,11 +939,11 @@ fn execute_ask_approved_runs_command() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Approved);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Approved);
 
-    let output = fence.execute("echo", ["hello"], ".").unwrap();
+    let output = nitera.execute("echo", ["hello"], ".").unwrap();
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
@@ -965,13 +965,13 @@ fn execute_ask_denied_returns_denied() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Denied);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Denied);
 
-    let result = fence.execute("echo", ["hello"], ".");
+    let result = nitera.execute("echo", ["hello"], ".");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -992,11 +992,11 @@ fn connect_ask_approved_opens_connection() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Approved);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Approved);
 
-    let result = fence.connect("127.0.0.1", port);
+    let result = nitera.connect("127.0.0.1", port);
 
     assert!(result.is_ok());
 
@@ -1017,13 +1017,13 @@ fn connect_ask_denied_returns_denied() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Denied);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Denied);
 
-    let result = fence.connect("127.0.0.1", 12345);
+    let result = nitera.connect("127.0.0.1", 12345);
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
 
     fs::remove_file(policy_path).unwrap();
 }
@@ -1046,13 +1046,13 @@ fn write_deny_rule_overrides_approving_handler() {
     )
     .unwrap();
 
-    let fence = Fence::load(&policy_path)
+    let nitera = Nitera::load(&policy_path)
         .unwrap()
-        .with_approval_handler(|_: &fence::FenceRequest| fence::ApprovalDecision::Approved);
+        .with_approval_handler(|_: &nitera::NiteraRequest| nitera::ApprovalDecision::Approved);
 
-    let result = fence.write(&file_path, b"hello");
+    let result = nitera.write(&file_path, b"hello");
 
-    assert!(matches!(result, Err(fence::FenceOperationError::Denied)));
+    assert!(matches!(result, Err(nitera::NiteraOperationError::Denied)));
     assert!(!file_path.exists());
 
     let _ = fs::remove_file(&policy_path);
@@ -1078,15 +1078,15 @@ fn write_allow_rule_never_invokes_handler() {
     )
     .unwrap();
 
-    let fence =
-        Fence::load(&policy_path)
+    let nitera =
+        Nitera::load(&policy_path)
             .unwrap()
-            .with_approval_handler(|_: &fence::FenceRequest| {
+            .with_approval_handler(|_: &nitera::NiteraRequest| {
                 CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                fence::ApprovalDecision::Approved
+                nitera::ApprovalDecision::Approved
             });
 
-    fence.write(&file_path, b"hello").unwrap();
+    nitera.write(&file_path, b"hello").unwrap();
 
     assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
 
@@ -1095,25 +1095,25 @@ fn write_allow_rule_never_invokes_handler() {
 }
 
 #[test]
-fn rejects_non_fence_policy_file() {
-    let path = std::env::temp_dir().join("fence-invalid-policy.txt");
+fn rejects_non_nitera_policy_file() {
+    let path = std::env::temp_dir().join("nitera-invalid-policy.txt");
 
     fs::write(&path, "[filesystem]\nallow read ./playground/**").unwrap();
 
-    let result = Fence::load(&path);
+    let result = Nitera::load(&path);
 
-    assert!(matches!(result, Err(FenceError::InvalidPolicyFile)));
+    assert!(matches!(result, Err(NiteraError::InvalidPolicyFile)));
 
     fs::remove_file(path).unwrap();
 }
 
 #[test]
-fn accepts_fence_policy_file() {
-    let path = std::env::temp_dir().join("fence-valid-policy.fence");
+fn accepts_nitera_policy_file() {
+    let path = std::env::temp_dir().join("nitera-valid-policy.nitera");
 
     fs::write(&path, "[filesystem]\nallow read ./playground/**").unwrap();
 
-    assert!(Fence::load(&path).is_ok());
+    assert!(Nitera::load(&path).is_ok());
 
     fs::remove_file(path).unwrap();
 }
