@@ -1,9 +1,21 @@
-# Nitera
+<p align="center">
+  <img src="assets/nitera-logo.png" width="120" alt="Nitera logo" />
+</p>
 
-[![Crates.io](https://img.shields.io/crates/v/nitera.svg)](https://crates.io/crates/nitera)
+<h1 align="center">
+  Nitera
+  <br/>
+  <a href="https://crates.io/crates/nitera">
+    <img src="https://img.shields.io/crates/v/nitera.svg" alt="Crates.io version" />
+  </a>
+  <br/>
+</h1>
 
-A zero-dependency policy engine for filesystem, process, and network access in Rust.
+<p align="center">
+  A zero-dependency policy engine for filesystem, process, and network access in Rust.
+</p>
 
+#
 ## Status
 
 v0.1.0. Built as a 72-hour hackathon project. The allow/ask/deny model, the `.nitera` file format, and the approval flow are implemented and tested.
