@@ -270,11 +270,10 @@ pub enum NiteraError {
     InvalidPolicyFile,
     Io(std::io::Error),
     Parse(ParseError),
-    Operation(NiteraOperationError),
 }
 ```
 
-Returned by `Nitera::load`. Implements `Display` and `std::error::Error`. `Io`, `Parse`, and `Operation` expose their wrapped errors through `source()`. `InvalidPolicyFile` indicates that the supplied path is not a `.nitera` policy file.
+Returned by `Nitera::load`. Implements `Display` and `std::error::Error`. `Io` and `Parse` expose their wrapped errors through `source()`. `InvalidPolicyFile` indicates that the supplied path is not a `.nitera` policy file.
 
 ### `NiteraOperationError`
 
