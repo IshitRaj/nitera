@@ -106,6 +106,26 @@ fn reports_missing_file_error() {
 }
 
 #[test]
+fn load_accepts_bare_relative_filename() {
+    let dir =
+        std::env::temp_dir().join(format!("nitera_bare_filename_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let original_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&dir).unwrap();
+
+    std::fs::write("policy.nitera", "[filesystem]\nallow read ./data/**\n").unwrap();
+    std::fs::create_dir("data").unwrap();
+
+    let result = Nitera::load("policy.nitera");
+
+    std::env::set_current_dir(&original_cwd).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(result.is_ok());
+}
+
+#[test]
 fn reports_parse_error_line_and_message() {
     let path = temp_policy_path();
 

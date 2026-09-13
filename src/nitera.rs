@@ -61,6 +61,7 @@ impl Nitera {
 
         let root = path
             .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."))
             .canonicalize()
             .map_err(NiteraError::Io)?;
