@@ -16,9 +16,6 @@
 </p>
 
 #
-## Status
-
-v0.1.0. Built as a 72-hour hackathon project. The allow/ask/deny model, the `.nitera` file format, and the approval flow are implemented and tested.
 
 ## Documentation
 
@@ -42,7 +39,7 @@ or add it directly to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nitera = "0.1.0"
+nitera = "0.1.1"
 ```
 
 ## Quick start
