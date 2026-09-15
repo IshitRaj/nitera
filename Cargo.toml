@@ -8,5 +8,12 @@ repository = "https://github.com/IshitRaj/nitera"
 readme = "README.md"
 keywords = ["security", "sandbox", "permissions", "policy"]
 categories = ["filesystem"]
+include = [
+    "src/**",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE*",
+    "Cargo.toml",
+]
 
 [dependencies]

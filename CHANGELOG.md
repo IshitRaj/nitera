@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Limited the crates.io package contents to essential source files and project metadata using Cargo's include configuration, excluding unnecessary repository files and assets from future package releases.
+
 ## [0.1.1] - 2026-09-13
 
 ### Fixed
