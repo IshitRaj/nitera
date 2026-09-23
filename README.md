@@ -138,6 +138,16 @@ A runnable demo lives in `examples/playground.rs`, creating files and directorie
 cargo run --example playground
 ```
 
+## Benchmarks
+
+`check()` currently does a linear scan through a policy's rules, so latency scales with rule count. In a release build that's about 2 microseconds at 1 rule and roughly 1.2 milliseconds at 1000 rules, well under the cost of the filesystem call it's guarding for any policy size most people will actually write.
+
+Full methodology, the dev vs release comparison, and charts are in [`BENCHMARKS.md`](BENCHMARKS.md).
+
+```bash
+cargo bench --bench policy_check
+```
+
 ## Development
 
 ```bash
