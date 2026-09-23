@@ -16,4 +16,8 @@ include = [
     "Cargo.toml",
 ]
 
+[[bench]]
+name = "policy_check"
+harness = false
+
 [dependencies]
