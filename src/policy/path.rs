@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 /// Replace a leading `~` with `$HOME`.
@@ -11,24 +13,28 @@ pub fn expand_home(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
         )
     })?;
 
+    Ok(expand_home_with(path, &home).into_owned())
+}
+
+fn expand_home_with<'a>(path: &'a Path, home: &'a OsStr) -> Cow<'a, Path> {
     if path == Path::new("~") {
-        return Ok(PathBuf::from(home));
+        return Cow::Borrowed(Path::new(home));
     }
 
     let path_str = path.to_string_lossy();
 
     if let Some(stripped) = path_str.strip_prefix("~/") {
-        return Ok(PathBuf::from(home).join(stripped));
+        return Cow::Owned(Path::new(home).join(stripped));
     }
 
-    Ok(path.to_path_buf())
+    Cow::Borrowed(path)
 }
 
 /// Lexically resolve "." and "..", pure component math, no disk access,
 /// so it works even for paths that don't exist yet.
 pub fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
     let path = path.as_ref();
-    let mut normalized = PathBuf::new();
+    let mut normalized = PathBuf::with_capacity(path.as_os_str().len());
 
     for component in path.components() {
         match component {
@@ -66,15 +72,30 @@ pub fn resolve_runtime_path(
     path: impl AsRef<Path>,
     base: impl AsRef<Path>,
 ) -> std::io::Result<PathBuf> {
-    let expanded = expand_home(path)?;
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "HOME environment variable not set",
+        )
+    })?;
+
+    Ok(resolve_runtime_path_with_home(
+        path.as_ref(),
+        base.as_ref(),
+        &home,
+    ))
+}
+
+pub(crate) fn resolve_runtime_path_with_home(path: &Path, base: &Path, home: &OsStr) -> PathBuf {
+    let expanded = expand_home_with(path, home);
 
     let absolute = if expanded.is_absolute() {
         expanded
     } else {
-        base.as_ref().join(expanded)
+        Cow::Owned(base.join(expanded))
     };
 
-    Ok(normalize_path(absolute))
+    normalize_path(absolute)
 }
 
 /// Resolve a runtime path against the current working directory.
