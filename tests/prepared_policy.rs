@@ -209,50 +209,52 @@ fn home_changes_child() {
 
     // A failed or stale home-relative deny must never be bypassed by a broad
     // allow. Assert the outcome directly, independently of the public evaluator.
-    std::fs::write(
-        &file,
-        "[filesystem]\ndeny read ~/private/**\nallow read /**\n",
-    )
-    .unwrap();
-    for initial in [Some(root.join("old-home")), None] {
-        unsafe {
-            if let Some(home) = &initial {
-                std::env::set_var("HOME", home);
-            } else {
+    for filler_count in [0, 128] {
+        let mut text = String::from("[filesystem]\ndeny read ~/private/**\nallow read /**\n");
+        for i in 0..filler_count {
+            text.push_str(&format!("deny read /indexed-other-{i}/**\n"));
+        }
+        std::fs::write(&file, text).unwrap();
+        for initial in [Some(root.join("old-home")), None] {
+            unsafe {
+                if let Some(home) = &initial {
+                    std::env::set_var("HOME", home);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+            }
+            let nitera = Nitera::load(&file).unwrap();
+            let home = root.join("restored-home");
+            unsafe {
+                std::env::set_var("HOME", &home);
+            }
+            let private = home.join("private/secret");
+            assert_eq!(
+                nitera.check(&NiteraRequest::filesystem(Operation::Read, private)),
+                Decision::Deny,
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                let path = home
+                    .join("private")
+                    .join(std::ffi::OsString::from_vec(b"secret-\xff".to_vec()));
+                assert_eq!(
+                    nitera.check(&NiteraRequest::filesystem(Operation::Read, path)),
+                    Decision::Deny,
+                );
+            }
+            unsafe {
                 std::env::remove_var("HOME");
             }
-        }
-        let nitera = Nitera::load(&file).unwrap();
-        let home = root.join("restored-home");
-        unsafe {
-            std::env::set_var("HOME", &home);
-        }
-        let private = home.join("private/secret");
-        assert_eq!(
-            nitera.check(&NiteraRequest::filesystem(Operation::Read, private)),
-            Decision::Deny,
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt;
-            let path = home
-                .join("private")
-                .join(std::ffi::OsString::from_vec(b"secret-\xff".to_vec()));
             assert_eq!(
-                nitera.check(&NiteraRequest::filesystem(Operation::Read, path)),
+                nitera.check(&NiteraRequest::filesystem(
+                    Operation::Read,
+                    root.join("public")
+                )),
                 Decision::Deny,
             );
         }
-        unsafe {
-            std::env::remove_var("HOME");
-        }
-        assert_eq!(
-            nitera.check(&NiteraRequest::filesystem(
-                Operation::Read,
-                root.join("public")
-            )),
-            Decision::Deny,
-        );
     }
     std::fs::remove_file(file).unwrap();
     std::fs::remove_dir(root).unwrap();

@@ -133,16 +133,113 @@ fn match_parts(
 }
 
 struct PathRules {
-    deny: Vec<PreparedPath>,
-    ask: Vec<PreparedPath>,
-    allow: Vec<PreparedPath>,
+    deny: PathSet,
+    ask: PathSet,
+    allow: PathSet,
 }
 
-fn prepare(patterns: &[PathPattern], base: &Path) -> Vec<PreparedPath> {
-    patterns
-        .iter()
-        .map(|pattern| PreparedPath::new(pattern, base))
-        .collect()
+struct PathSet {
+    patterns: Vec<PreparedPath>,
+    // Empty means the original scan. Otherwise the first rule stays in place
+    // and the remaining rules are sorted by prefix.
+    prefix_lengths: Box<[usize]>,
+}
+
+impl PathSet {
+    fn scan(patterns: Vec<PreparedPath>) -> Self {
+        Self {
+            patterns,
+            prefix_lengths: Box::default(),
+        }
+    }
+
+    fn new(mut patterns: Vec<PreparedPath>) -> Self {
+        // Small lists and broad globs are cheaper to scan. Bound the number
+        // of prefix searches for policies with many different anchor lengths.
+        const MIN_RULES: usize = 64;
+        const MIN_PREFIXES: usize = 8;
+        const MAX_PREFIX_LENGTHS: usize = 16;
+        if patterns.len() < MIN_RULES {
+            return Self::scan(patterns);
+        }
+
+        let mut prefixes: Vec<_> = patterns
+            .iter()
+            .map(|pattern| pattern.prefix.as_str())
+            .collect();
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        let distinct_prefixes = prefixes.len();
+        let mut prefix_lengths: Vec<_> = prefixes.iter().map(|prefix| prefix.len()).collect();
+        drop(prefixes);
+        prefix_lengths.sort_unstable();
+        prefix_lengths.dedup();
+        if distinct_prefixes < MIN_PREFIXES || prefix_lengths.len() > MAX_PREFIX_LENGTHS {
+            return Self::scan(patterns);
+        }
+
+        // Keep the first rule's cheap short circuit. Stable sorting retains the
+        // order of the remaining rules sharing an anchor. Actions stay separate.
+        patterns[1..].sort_by(|left, right| left.prefix.cmp(&right.prefix));
+        Self {
+            patterns,
+            prefix_lengths: prefix_lengths.into_boxed_slice(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    #[inline]
+    fn matches(&self, path: &str) -> bool {
+        if self.patterns.is_empty() {
+            return false;
+        }
+        if self.prefix_lengths.is_empty() {
+            self.patterns.iter().any(|pattern| pattern.matches(path))
+        } else {
+            self.patterns[0].matches(path) || self.matches_indexed(path)
+        }
+    }
+
+    fn matches_indexed(&self, path: &str) -> bool {
+        let patterns = &self.patterns[1..];
+        for &length in &self.prefix_lengths {
+            if length > path.len() {
+                break;
+            }
+            // An exact rule needs the whole path. A glob anchor must end
+            // at a component boundary, including the empty anchor.
+            if length != path.len() && path.as_bytes()[length] != b'/' {
+                continue;
+            }
+            let Some(prefix) = path.get(..length) else {
+                continue;
+            };
+            let first = patterns.partition_point(|pattern| pattern.prefix.as_str() < prefix);
+            for pattern in &patterns[first..] {
+                if pattern.prefix != prefix {
+                    break;
+                }
+                // The index only finds candidates; the existing matcher
+                // remains responsible for the final decision.
+                if pattern.matches(path) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+fn prepare(patterns: &[PathPattern], base: &Path) -> PathSet {
+    PathSet::new(
+        patterns
+            .iter()
+            .map(|pattern| PreparedPath::new(pattern, base))
+            .collect(),
+    )
 }
 
 impl PathRules {
@@ -155,11 +252,11 @@ impl PathRules {
     }
 
     fn evaluate(&self, path: &str) -> Decision {
-        if self.deny.iter().any(|pattern| pattern.matches(path)) {
+        if self.deny.matches(path) {
             Decision::Deny
-        } else if self.ask.iter().any(|pattern| pattern.matches(path)) {
+        } else if self.ask.matches(path) {
             Decision::Ask
-        } else if self.allow.iter().any(|pattern| pattern.matches(path)) {
+        } else if self.allow.matches(path) {
             Decision::Allow
         } else {
             Decision::Deny
@@ -176,7 +273,7 @@ pub(crate) struct PreparedPolicy {
     write: PathRules,
     delete: PathRules,
     create: PathRules,
-    scope: Vec<PreparedPath>,
+    scope: PathSet,
 }
 
 impl PreparedPolicy {
@@ -232,7 +329,7 @@ impl PreparedPolicy {
             return rules.evaluate(&path);
         }
 
-        if !self.scope.iter().any(|scope| scope.matches(&path)) {
+        if !self.scope.matches(&path) {
             return Decision::Deny;
         }
         let Target::Process { command, .. } = &request.target else {
@@ -254,6 +351,158 @@ impl PreparedPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_candidates_agree_with_a_full_scan() {
+        let base = Path::new("/base");
+        let mut patterns = Vec::new();
+        for i in 0..128 {
+            for suffix in ["/**", "/*/x", "/exact", "/**/last"] {
+                patterns.push(PathPattern(format!("./groups/id{i}{suffix}")));
+            }
+        }
+        patterns.extend(
+            [
+                "/**/private",
+                "/**/a/**/last",
+                "/",
+                "/literal*.txt",
+                "/é/東京/**",
+            ]
+            .into_iter()
+            .map(|pattern| PathPattern(pattern.into())),
+        );
+        let index = prepare(&patterns, base);
+        assert!(!index.prefix_lengths.is_empty());
+        let scan: Vec<_> = patterns
+            .iter()
+            .map(|pattern| PreparedPath::new(pattern, base))
+            .collect();
+        let mut paths = vec![
+            "/".to_owned(),
+            "/private".into(),
+            "/a/b/last".into(),
+            "/literal*.txt".into(),
+            "/literal.txt".into(),
+            "/é/東京/file".into(),
+            "/é/東京外/file".into(),
+        ];
+        for i in 0..132 {
+            for suffix in [
+                "",
+                "/",
+                "/x",
+                "/a/x",
+                "/a/last",
+                "/exact",
+                "/exact/more",
+                "-other",
+                "/é",
+                "/private",
+            ] {
+                paths.push(format!("/base/groups/id{i}{suffix}"));
+            }
+        }
+        for path in paths {
+            assert_eq!(
+                index.matches(&path),
+                scan.iter().any(|pattern| pattern.matches(&path)),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn broad_and_irregular_sets_keep_the_scan() {
+        let base = Path::new("/base");
+        let broad: Vec<_> = (0..128)
+            .map(|i| PathPattern(format!("/**/file{i}")))
+            .collect();
+        assert!(prepare(&broad, base).prefix_lengths.is_empty());
+        let irregular: Vec<_> = (1..=128)
+            .map(|i| PathPattern(format!("/{}/**", "a".repeat(i))))
+            .collect();
+        assert!(prepare(&irregular, base).prefix_lengths.is_empty());
+    }
+
+    #[test]
+    fn indexed_process_scopes_preserve_command_decisions() {
+        let base = Path::new("/base");
+        let mut source = Policy::default();
+        source.process.scope = (0..128)
+            .map(|i| PathPattern(format!("./group{i}/**")))
+            .collect();
+        source.process.scope.push(PathPattern("/**/shared".into()));
+        source.process.allow = vec!["git".into(), "sh".into(), "blocked".into()];
+        source.process.ask = vec!["sh".into()];
+        source.process.deny = vec!["blocked".into()];
+        let prepared = PreparedPolicy::new(source.clone(), base);
+        assert!(!prepared.scope.prefix_lengths.is_empty());
+        for i in 0..132 {
+            for command in ["git", "sh", "blocked", "unknown"] {
+                let request =
+                    NiteraRequest::process(command, ["--version"], format!("./group{i}/cwd"));
+                assert_eq!(
+                    prepared.evaluate(&request, base),
+                    source.evaluate(&request, base),
+                    "{request:?}"
+                );
+            }
+        }
+        let request = NiteraRequest::process("git", ["status"], "/outside/shared");
+        assert_eq!(prepared.evaluate(&request, base), Decision::Allow);
+        assert_eq!(
+            prepared.evaluate(&request, base),
+            source.evaluate(&request, base)
+        );
+    }
+
+    #[test]
+    fn indexed_policy_preserves_precedence_and_unanchored_denies() {
+        let base = Path::new("/base");
+        let mut text = String::from("[filesystem]\n");
+        for i in 0..128 {
+            text.push_str(&format!("allow read ./group{i}/**\nask read ./group{i}/review/**\ndeny read ./group{i}/secret/**\n"));
+        }
+        text.push_str("allow read /**\nask read /**/confirm\ndeny read /**/forbidden\n");
+        let source = super::super::parse(&text).unwrap();
+        let prepared = PreparedPolicy::new(source.clone(), base);
+        assert!(!prepared.read.deny.prefix_lengths.is_empty());
+        assert!(!prepared.read.ask.prefix_lengths.is_empty());
+        assert!(!prepared.read.allow.prefix_lengths.is_empty());
+        for i in 0..132 {
+            for suffix in [
+                "",
+                "/file",
+                "/secret/data",
+                "/review/data",
+                "/review/forbidden",
+                "/confirm",
+                "/secret/../review/file",
+                "/é",
+            ] {
+                let request =
+                    NiteraRequest::filesystem(Operation::Read, format!("./group{i}{suffix}"));
+                assert_eq!(
+                    prepared.evaluate(&request, base),
+                    source.evaluate(&request, base),
+                    "{request:?}"
+                );
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let path = std::ffi::OsString::from_vec(b"/base/group7/secret/invalid-\xff".to_vec());
+            let request =
+                NiteraRequest::filesystem(Operation::Read, std::path::PathBuf::from(path));
+            assert_eq!(prepared.evaluate(&request, base), Decision::Deny);
+            assert_eq!(
+                prepared.evaluate(&request, base),
+                source.evaluate(&request, base)
+            );
+        }
+    }
 
     #[test]
     fn prepared_paths_agree_with_original_recursive_matcher() {

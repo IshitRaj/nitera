@@ -1,74 +1,86 @@
 # Policy-check benchmarks
 
-`Nitera::check()` still scans rules linearly. This compares the original
-implementation at `07469ba` with the prepared matcher using the same machine,
-working directory and benchmark harness.
+The prepared matcher uses a linear scan for small or unselective path rule
+sets. Larger sets can use a sorted prefix index to find candidates, which are
+then checked by the same matcher. This comparison uses the optimized linear
+implementation at `66f6d23` as the baseline.
 
-## Results
+## Check latency
 
 Apple M5 Pro, 24 GiB RAM, macOS 27.0, Rust 1.98.1, optimized Cargo bench profile.
 
-| Nonmatching rules | Total rules | Original median | Updated median | Speedup | p95 original → updated | p99 original → updated |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 2 | 1,500 ns | 250 ns | 6.00× | 1,584 → 292 ns | 1,958 → 334 ns |
-| 10 | 11 | 8,166 ns | 208 ns | 39.26× | 9,791 → 209 ns | 12,500 → 291 ns |
-| 50 | 51 | 36,916 ns | 209 ns | 176.63× | 42,625 → 250 ns | 50,583 → 292 ns |
-| 200 | 201 | 147,917 ns | 375 ns | 394.45× | 169,542 → 417 ns | 190,459 → 500 ns |
-| 1,000 | 1,001 | 760,792 ns | 1,333 ns | 570.74× | 822,625 → 1,417 ns | 883,417 → 1,667 ns |
+| Total rules | Linear median | Indexed median | Speedup | Linear p95 | Indexed p95 | Linear p99 | Indexed p99 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 167 ns | 167 ns | 1.00× | 208 ns | 208 ns | 250 ns | 250 ns |
+| 11 | 167 ns | 167 ns | 1.00× | 209 ns | 209 ns | 250 ns | 250 ns |
+| 51 | 208 ns | 208 ns | 1.00× | 291 ns | 291 ns | 292 ns | 292 ns |
+| 201 | 375 ns | 208 ns | 1.80× | 500 ns | 291 ns | 500 ns | 292 ns |
+| 1,001 | 1,250 ns | 209 ns | 5.98× | 1,625 ns | 292 ns | 1,791 ns | 333 ns |
 
-At 1,001 total rules, median latency fell from 760.792 µs to 1.333 µs.
-The earlier version of this PR (`b2b3101`) measured 2.292 µs in the same
-session, so the follow-up changes reduced that latency by a further 42%.
+At 1,001 rules, the indexed version reduced median latency from 1.250 µs to
+0.209 µs. These numbers compare against the already-optimized linear matcher,
+not the original implementation's much slower timings.
 
-## Method
+The existing `benches/policy_check.rs` harness is unchanged. It creates N
+nonmatching rules and one matching rule, then performs 1,000 warmup calls and
+100,000 individually timed checks. Its `rule_count` labels exclude the final
+matching rule; this table includes it. Loading and request construction are
+outside the timed region.
 
-The harness in `benches/policy_check.rs` is unchanged. It generates N
-nonmatching `allow read ./bench/dirN/**` rules followed by one matching
-`allow read ./bench/target/**` rule. The request reads
-`./bench/target/file.txt`, so the scan reaches the last rule.
+Both versions were built with `cargo build --release --bench policy_check`.
+Their saved executables ran from the same directory for five rounds, with the
+order alternating between rounds. Each table entry is the median of that
+statistic across the five runs; p95 and p99 are not pooled percentiles.
 
-Rows are labeled by nonmatching rules. The row labeled 1,000 contains 1,001
-total rules. Each row uses a 1,000-call warmup and 100,000 individually timed
-checks. Policy loading and request construction happen before timing starts.
-
-The original executable was saved before changing the source. The previous
-PR revision and the updated source were also built with:
-
-```sh
-cargo build --release --bench policy_check
-```
-
-All three executables ran from the same directory, in order: original,
-previous PR revision, updated version. Running the saved executables directly
-keeps policy base paths identical even when their sources are built in
-separate checkouts. Each executable ran once in this final comparison.
-
-To run the benchmark for a single checkout:
+To run the benchmark for a checkout:
 
 ```sh
 cargo bench --bench policy_check
 ```
 
-## Changes and limits
+The earlier original-to-linear comparison remains available in `66f6d23`.
+Do not combine speedup ratios from separate sessions or machines.
 
-Patterns are prepared at load time, while each request is resolved once.
-Exact paths use equality checks. Literal prefixes use a component-boundary
-check, with a cheap final-byte rejection before comparing a shared prefix.
-Glob suffixes after the final `**` are matched from the end of the path,
-avoiding repeated attempts at positions where they cannot match.
+## Index behavior
 
-On Unix, relative paths are normalized without an intermediate joined buffer,
-and already-normalized absolute paths can be borrowed. Other platforms keep
-the existing path-joining behavior. HOME validation still runs before using
-these fast paths; the source policy is retained for changes to HOME after load.
+Each deny, ask and allow list has its own index. Process scopes use the same
+path lookup. The first rule stays in place for a cheap early match; the rest
+are sorted by their literal prefix, retaining order within each prefix group.
+Lookup checks the relevant prefix lengths, binary-searches the matching groups,
+and passes every candidate through the existing path matcher.
 
-The scan order, Deny → Ask → Allow precedence, public API and zero-dependency
-setup stay the same. Preparation adds load-time work and memory.
+Rules with empty prefixes, such as `/**/private`, remain candidates. An exact
+match needs the entire path; a glob prefix must end at a component boundary.
+The index cannot omit a matching rule: its prefix length is recorded, its
+matching prefix passes the boundary check, and its entire group is examined.
 
-These timings cover one filesystem workload. General globs can still
-backtrack, and the table does not establish performance for every policy,
-resource type or path shape. It is not a claim of a universal lower bound.
+The index is used only for sets with at least 64 rules, at least eight distinct
+prefixes, and no more than 16 distinct prefix lengths. Other sets retain the
+scan. Broad wildcard groups can still require scanning many candidates, so
+this does not guarantee logarithmic lookup for every policy.
 
-Each implementation was measured once. Timer resolution and scheduling noise
-matter at the low end: the updated 1-rule row was slower than the 10-rule row.
-The table measures policy checks, not the filesystem operations they authorize.
+HOME changes still use the original source evaluator. Missing HOME, non-UTF-8
+paths, normalization, deny/ask/allow precedence and the public API retain their
+existing behavior. No request results are cached and no dependencies were added.
+
+## Loading and memory
+
+For the 1,001-rule fixture, paired load measurements were 0.728 ms for the linear
+version and 0.767 ms for the indexed version, about 5.4% more load time. At
+10,001 rules they were 7.214 ms and 7.358 ms. These are medians of 31 alternating
+measurements after warmup, including reading and parsing the policy.
+
+At 1,001 rules, retained Rust heap allocations increased by 24 bytes, and the
+Nitera value grew by 208 bytes. Peak requested Rust heap memory during loading
+increased by about 54 KiB due to temporary sorting buffers. These measurements
+exclude allocator bookkeeping and are not process RSS measurements.
+
+## Limits
+
+The standard harness covers a last-match filesystem workload. Other policies
+can have different costs. Additional checks covered early matches, misses,
+shared prefixes, exact paths and broad globs, but they do not establish a speedup
+for every possible workload. Very small measurements are particularly sensitive
+to timer resolution and scheduling. The table measures permission checks, not
+the filesystem operations they authorize. Runtime measurements here are on macOS;
+other platforms still need their own performance measurements.
