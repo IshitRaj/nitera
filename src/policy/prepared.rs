@@ -55,6 +55,14 @@ impl PreparedPath {
             Tail::Never => false,
             Tail::Exact => path == self.prefix,
             tail => {
+                // Rules often share a long directory prefix. A cheap comparison
+                // at its end can reject a mismatch before comparing that prefix.
+                let prefix = self.prefix.as_bytes();
+                if let Some(last) = prefix.last()
+                    && path.as_bytes().get(prefix.len() - 1) != Some(last)
+                {
+                    return false;
+                }
                 let Some(rest) = path.strip_prefix(&self.prefix) else {
                     return false;
                 };
@@ -65,7 +73,12 @@ impl PreparedPath {
                 }
                 match tail {
                     Tail::Subtree => true,
-                    Tail::Glob(parts) => match_parts(parts, rest.split('/').skip(1)),
+                    Tail::Glob(parts) => match_parts(
+                        parts,
+                        rest.strip_prefix('/')
+                            .into_iter()
+                            .flat_map(|rest| rest.split('/')),
+                    ),
                     _ => unreachable!(),
                 }
             }
@@ -77,8 +90,23 @@ impl PreparedPath {
 // cursors only; neither splitting nor backtracking allocates during a check.
 fn match_parts(
     mut pattern: &[String],
-    mut path: impl Iterator<Item = impl AsRef<str>> + Clone,
+    mut path: impl DoubleEndedIterator<Item = impl AsRef<str>> + Clone,
 ) -> bool {
+    // Components after the final ** are anchored at the end of the path.
+    // Checking them first avoids trying the same suffix at every position.
+    while let Some((part, remaining)) = pattern.split_last() {
+        if part == "**" {
+            break;
+        }
+        let Some(value) = path.next_back() else {
+            return false;
+        };
+        if part != "*" && part != value.as_ref() {
+            return false;
+        }
+        pattern = remaining;
+    }
+
     while let Some((part, remaining)) = pattern.split_first() {
         if part == "**" {
             if remaining.is_empty() {
@@ -256,6 +284,50 @@ mod tests {
                     original.matches_from(Path::new(path), base),
                     "pattern={:?}, path={path:?}",
                     original.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anchored_glob_suffixes_preserve_recursive_matching() {
+        let base = Path::new("/");
+        let patterns = [
+            "/**/a",
+            "/**/*",
+            "/**/a/b",
+            "/**/*/b",
+            "/a/*/**/b",
+            "/**/a/**/b",
+            "/**/a/**/a/b",
+            "/**/*/**/*",
+            "/**/**/b",
+            "/a/*/b",
+            "/**/é/*",
+            "/**/*.txt",
+            "/**/a/**/b/**/c",
+        ];
+        let mut paths = vec![String::from("/")];
+        let mut level = vec![String::new()];
+        for _ in 0..5 {
+            level = level
+                .iter()
+                .flat_map(|prefix| {
+                    ["a", "b", "c", "é"]
+                        .into_iter()
+                        .map(move |part| format!("{prefix}/{part}"))
+                })
+                .collect();
+            paths.extend(level.iter().cloned());
+        }
+        for text in patterns {
+            let original = PathPattern(text.into());
+            let prepared = PreparedPath::new(&original, base);
+            for path in &paths {
+                assert_eq!(
+                    prepared.matches(path),
+                    original.matches_from(Path::new(path), base),
+                    "pattern={text:?}, path={path:?}",
                 );
             }
         }
