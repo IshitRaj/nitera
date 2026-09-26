@@ -1,36 +1,53 @@
 # Security and hardening audit, 1.0.0
 
-Status: **proposal only. No source changes in this PR.**
+**Status: open, nothing fixed yet.** Published in draft alongside the
+v1.0.0 release commit (`e099faf`) as a tracking document. The crate as
+published on crates.io has every finding below.
 
-Every claim below was verified by reading the code and, where marked
-"verified", by running a throwaway program against this exact checkout.
-The probe crates were deleted; the repository is unmodified.
+Two of them, items 1 and 2, are confirmed policy bypasses. A caller
+behind a narrow `allow` plus a broad `deny` can be made to read a
+protected file, and on a case-insensitive filesystem the second one
+requires nothing created on disk at all. Both return the payload.
+Reproduction is in the sections below.
 
-Latency figures refer to the current baseline in `BENCHMARKS.md`:
-375 ns median for `check()` at 1,000 rules, on an M2, release profile.
+Fixes are landing as separate, independently reviewable PRs. The Status
+column below tracks them, and the sequencing table at the end gives the
+intended order. The findings themselves are not up for debate.
+
+Every claim here was checked by reading the code and, where marked
+"verified", by running a throwaway program against the v1.0.0 checkout.
+Those probe crates were deleted and are not part of the repository.
+
+Latency figures refer to the baseline in `BENCHMARKS.md`: 375 ns median
+for `check()` at 1,000 rules, on an M2, release profile. Exactly one
+item in this audit moves that number, and it says so when you reach it.
 
 ## Verification summary
 
-| # | Finding | Class | How confirmed |
-|---|---|---|---|
-| 1 | Symlink traversal bypasses narrow patterns and explicit denies | security | verified, payload returned |
-| 2 | Case-folding bypass on case-insensitive filesystems | security | verified, payload returned |
-| 3 | Windows path handling is broken | correctness | code inspection, needs a Windows host |
-| 4 | Comma in a path silently splits into two patterns | correctness | verified |
-| 5 | `#` in a path silently truncates the rule | correctness | verified |
-| 6 | Double space between action and kind breaks parsing | correctness | verified |
-| 7 | Process arguments are not evaluated | model gap | verified |
-| 8 | Network port is not evaluated | model gap | verified |
-| 9 | Environment is inherited wholesale and is not policy-able | model gap | verified |
-| 10 | `read_dir`, `rename`, `copy`, symlink and metadata are not covered at all | model gap | verified |
-| 11 | `HOME` is required even when no rule uses `~` | robustness | verified |
-| 12 | `Nitera::load(".nitera")` always fails | bug | verified |
-| 13 | `NiteraOperationError::Denied` carries no request | auditability | verified |
-| 14 | Public enums are not `#[non_exhaustive]` | evolution | verified |
-| 15 | `Nitera` derives nothing, so no `Debug` | ergonomics | verified |
-| 16 | Normalization failure becomes a silent never-match rule | latent | verified masked |
-| 17 | macOS `/tmp` versus `/private/tmp` aliasing | footgun | code inspection |
-| 18 | `examples/playground.nitersa` still contains finding 5's cousin | docs | verified |
+Numbering here matches the section headings below, which is what the
+sequencing table at the end refers to.
+
+| # | Finding | Class | How confirmed | Status |
+|---|---|---|---|---|
+| 1 | Symlink traversal bypasses narrow patterns and explicit denies | security | verified, payload returned | open |
+| 2 | Case-folding bypass on case-insensitive filesystems | security | verified, payload returned | open |
+| 3 | Windows path handling is broken | correctness | code inspection, needs a Windows host | open |
+| 4 | Comma in a path silently splits into two patterns | correctness | verified | open |
+| 5 | `#` in a path silently truncates the rule | correctness | verified | open |
+| 6 | Double space between action and kind breaks parsing | correctness | verified | open |
+| 7 | Process arguments are not evaluated | model gap | verified | open |
+| 8 | Network port is not evaluated | model gap | verified | open |
+| 9 | Environment is inherited wholesale and is not policy-able | model gap | verified | open |
+| 10 | `read_dir`, `rename`, `copy`, symlink and metadata are not covered at all | model gap | verified | open |
+| 11 | `create_dir` is single level, with no `create_dir_all` | ergonomics | verified | open |
+| 12 | `Nitera::load(".nitera")` always fails | bug | verified | open |
+| 13 | `HOME` is required even when no rule uses `~` | robustness | verified | open |
+| 14 | `NiteraOperationError::Denied` carries no request | auditability | verified | open |
+| 15 | Public enums are not `#[non_exhaustive]` | evolution | verified | open |
+| 16 | `Nitera` derives nothing, so no `Debug` | ergonomics | verified | open |
+| 17 | Normalization failure becomes a silent never-match rule | latent | verified masked | open |
+| 18 | macOS `/tmp` versus `/private/tmp` aliasing | footgun | code inspection | open |
+| 19 | `examples/playground.nitersa` has a dead `allow host` line, see docs below | docs | verified | open |
 
 ## P0, security bypasses
 
@@ -461,12 +478,41 @@ Explicitly out of scope, so they are not mistaken for oversights:
 - Any global enforcement of `std::fs`. Not possible from a library.
 - Async. Premature for the current API shape.
 
-## Honest framing for the next release
+## Threat model, stated honestly
 
-Items 1 and 2 are the finding that matters: on a default macOS setup, or
-any case-insensitive filesystem, a narrow `allow` plus a broad `deny`
-policy can be bypassed without creating anything on disk. Until they are
-fixed, the correct description of the crate is "authorization helper for
-cooperative, same-process code, with a human in the loop for ambiguity",
-and the README should not imply it defends against a hostile caller. The
-existing "Current limits" section gestures at this but understates it.
+Nitera is an authorization and audit layer for code that opts in to it.
+It is not a sandbox, and it is not a boundary against a hostile caller.
+
+Items 1 and 2 are why that distinction matters concretely rather than
+academically. On a default macOS setup, or any case-insensitive
+filesystem, a narrow `allow` plus a broad `deny` policy can be bypassed
+and the protected file will be returned. Item 2 needs nothing created on
+disk, only a policy author writing `.SSH` where the caller writes
+`.ssh`, which is an ordinary mistake rather than an attack.
+
+So the accurate description of the crate today is: cooperative,
+same-process code, with a human in the loop for ambiguous operations,
+and a policy narrow enough that the remaining gaps do not matter for the
+code you control. The existing "Current limits" section in `README.md`
+gestures at this but understates it, since it describes the symlink
+issue as a boundary "not currently handled" rather than a case where an
+explicit `deny` does not fire.
+
+Two things this document deliberately does not claim:
+
+- That the fixes will make nitera safe against untrusted input. Symlink
+  resolution narrows the traversal window; it does not close it.
+  Descriptor-relative syscalls are the actual answer, and that is
+  `cap-std`'s job.
+- That any of this is novel. Symlink traversal past lexical path checks
+  is CWE-59 and case-confusion path handling is CWE-178. Both are
+  long-known classes, found by reading a day's worth of path code. The
+  contribution here is that this particular crate has both, and that
+  1.0.0 shipped with them.
+
+## Reporting
+
+Found something in the policy engine that is not in this document, or
+disagree with a finding? Open an issue. Fix PRs against the items above
+are welcome, and the ones marked as touching latency should say what
+they measured.
