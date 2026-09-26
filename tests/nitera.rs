@@ -1307,3 +1307,59 @@ fn create_accepts_empty_content() {
     fs::remove_file(target).unwrap();
     fs::remove_file(policy_path).unwrap();
 }
+
+#[test]
+fn loads_policy_from_bare_dotfile_named_nitera() {
+    // `Path::new(".nitera").extension()` is `None`, because a leading dot
+    // reads as a hidden-file marker rather than a separator. The README
+    // quick start uses exactly this filename, so it has to load.
+    let dir = unique_path("dotfile-policy");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(".nitera");
+
+    fs::write(&path, "[filesystem]\nallow read ./**\n").unwrap();
+
+    let nitera = Nitera::load(&path).expect("a file named exactly .nitera should load");
+
+    assert_eq!(
+        nitera.check(&NiteraRequest::filesystem(Operation::Read, "./x.txt")),
+        Decision::Allow
+    );
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn still_rejects_other_extensions() {
+    let dir = unique_path("wrong-ext");
+    fs::create_dir_all(&dir).unwrap();
+
+    for name in ["policy.nitersa", "policy.txt", "policy", ".nitera.bak"] {
+        let path = dir.join(name);
+        fs::write(&path, "[filesystem]\n").unwrap();
+        assert!(
+            matches!(Nitera::load(&path), Err(NiteraError::InvalidPolicyFile)),
+            "{name} should be rejected"
+        );
+    }
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn nitera_is_debug_formattable() {
+    let (nitera, policy_path) = nitera_with_create_rule("allow", &unique_path("debug.txt"));
+
+    let rendered = format!("{nitera:?}");
+    assert!(rendered.starts_with("Nitera"), "{rendered}");
+    assert!(rendered.contains("root"), "{rendered}");
+    assert!(rendered.contains("approval_handler"), "{rendered}");
+    assert!(rendered.contains("none"), "{rendered}");
+
+    let with_handler = nitera_with_create_rule("allow", &unique_path("debug2.txt"))
+        .0
+        .with_approval_handler(|_: &NiteraRequest| ApprovalDecision::Approved);
+    assert!(format!("{with_handler:?}").contains("registered"));
+
+    fs::remove_file(policy_path).unwrap();
+}

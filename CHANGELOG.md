@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `Nitera::load(".nitera")` now works. The extension check rejected a file named exactly `.nitera`, because `Path::extension` reports no extension for a dotfile, which made the documented quick start fail with `InvalidPolicyFile`. A path is now accepted if its extension is `nitera` or its file name is exactly `.nitera`.
+- The `.nitera` parser no longer fails on a run of whitespace between a rule's action and its kind. `allow  read ./a` produced an empty kind and an `unknown filesystem operation: ` error with no name in it. A values list keeps its spacing around commas, since that field is still the rest of the line.
+
+### Added
+
+- `Nitera` implements `Debug`, so it can be logged or embedded in a struct that derives it. The output shows the policy root and whether an approval handler is registered, and does not reach into the prepared policy or the handler.
+
 ## [1.0.0] - 2026-09-26
 
 ### Changed

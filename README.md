@@ -134,9 +134,9 @@ match nitera.write(path, content) {
 
 `Nitera::load` returns `NiteraError`:
 
-* `InvalidPolicyFile` — the supplied path does not have a `.nitera` extension.
-* `Io` — the policy file could not be read, or its parent directory could not be canonicalized.
-* `Parse` — the `.nitera` file contents could not be parsed.
+* `InvalidPolicyFile`: the supplied path is not a `.nitera` policy file. Either the extension has to be `nitera` (`policy.nitera`), or the file has to be named exactly `.nitera`.
+* `Io`: the policy file could not be read, or its parent directory could not be canonicalized.
+* `Parse`: the `.nitera` file contents could not be parsed.
 
 Every guarded operation (`read`, `write`, `delete`, `execute`, `connect`) returns `NiteraOperationError`, and `Nitera::load` returns `NiteraError`. Both implement `Display` and `std::error::Error`, so they compose with `?` in your own functions.
 

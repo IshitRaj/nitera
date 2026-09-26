@@ -36,23 +36,37 @@ enum Section {
     Network,
 }
 
+/// Split off the next whitespace-delimited field, returning it with the
+/// remainder. Leading whitespace is skipped, so a run of separators
+/// between `action` and `kind` does not yield an empty field.
+fn take_field(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return None;
+    }
+    Some(match input.find(char::is_whitespace) {
+        Some(end) => (&input[..end], &input[end..]),
+        None => (input, ""),
+    })
+}
+
 fn parse_rule<'a>(line: &'a str, line_number: usize) -> Result<Rule<'a>, ParseError> {
-    let mut parts = line.splitn(3, char::is_whitespace);
+    let line = line.trim();
 
-    let action = parts
-        .next()
-        .ok_or_else(|| ParseError::new(line_number, "missing action"))?;
+    let Some((action, after_action)) = take_field(line) else {
+        return Err(ParseError::new(line_number, "missing action"));
+    };
 
-    let kind = parts
-        .next()
-        .ok_or_else(|| ParseError::new(line_number, "missing rule"))?;
-
-    let values = parts.next().unwrap_or("").trim();
+    let Some((kind, values)) = take_field(after_action) else {
+        return Err(ParseError::new(line_number, "missing rule"));
+    };
 
     Ok(Rule {
         action,
         kind,
-        values,
+        // The values field is the rest of the line rather than a third
+        // whitespace split, so a list can contain spaces around commas.
+        values: values.trim(),
     })
 }
 

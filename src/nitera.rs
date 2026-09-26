@@ -22,6 +22,24 @@ pub struct Nitera {
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
 
+/// Prints the policy root and whether an approval handler is registered,
+/// without reaching into the prepared policy or the handler itself.
+impl std::fmt::Debug for Nitera {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Nitera")
+            .field("root", &self.root)
+            .field(
+                "approval_handler",
+                if self.approval_handler.is_some() {
+                    &"registered"
+                } else {
+                    &"none"
+                },
+            )
+            .finish()
+    }
+}
+
 impl std::fmt::Display for NiteraOperationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -50,10 +68,14 @@ impl std::error::Error for NiteraOperationError {
 
 impl Nitera {
     /// Loads a Nitera policy from a `.nitera` file.
+    ///
+    /// The path must either carry a `nitera` extension (`policy.nitera`)
+    /// or be named exactly `.nitera`. The latter is a dotfile, so
+    /// `Path::extension` reports no extension for it.
     pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, NiteraError> {
         let path = path.as_ref();
 
-        if path.extension().and_then(|ext| ext.to_str()) != Some("nitera") {
+        if !has_nitera_extension(path) {
             return Err(NiteraError::InvalidPolicyFile);
         }
 
@@ -222,6 +244,17 @@ impl Nitera {
         self.authorize(&request)?;
         std::net::TcpStream::connect((host.as_str(), port)).map_err(NiteraOperationError::Io)
     }
+}
+
+/// Whether `path` names a Nitera policy file.
+///
+/// Accepts either a `nitera` extension or a file named exactly
+/// `.nitera`. `Path::extension` treats a leading dot as a hidden-file
+/// marker rather than a separator, so `Path::new(".nitera").extension()`
+/// is `None` and the dotfile form needs its own check.
+fn has_nitera_extension(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("nitera")
+        || path.file_name().and_then(|name| name.to_str()) == Some(".nitera")
 }
 
 /// Errors produced while loading a Nitera policy.
