@@ -172,7 +172,7 @@ Process scopes use the same path lookup. A matching scope is required before the
 
 While `HOME` matches its value at load time, path checks use the prepared rules. If it changes, checks use the retained source policy and resolve home-relative rules against the current value. If `HOME` is unset, filesystem and process path checks fail closed. This preserves home-relative deny rules even when a broad allow rule could also match.
 
-Preparation and sorting add load-time work and temporary memory. Lookup can avoid visiting unrelated rules in a selective set, but broad glob groups may still require many matches. See [`BENCHMARKS.md`](BENCHMARKS.md) for measurements and their limits.
+Preparation and sorting add load-time work and temporary memory. Lookup can avoid visiting unrelated rules in a selective set, but broad glob groups may still require many matches. See [`BENCHMARKS.md`](BENCHMARKS.md) for the reported Apple M2 measurements, charts, and comparison limits.
 
 The public `Policy::evaluate()` API continues to scan the policy's current fields directly. It does not retain a prepared index, so callers can still construct or edit a `Policy` in memory and evaluate it immediately.
 

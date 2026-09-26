@@ -150,7 +150,7 @@ cargo run --example playground
 
 Check cost depends on rule count, pattern shape, and whether the set uses a scan or an index. Broad wildcard patterns can still require scanning many candidates.
 
-Hardware-specific measurements and the benchmark methodology are in [`BENCHMARKS.md`](BENCHMARKS.md).
+The supplied Apple M2 run (16 GB RAM, macOS 27.0, Rust 1.98.1, optimized Cargo bench profile) reports **375 ns median and 500 ns p99 at 1,001 total rules**. Full M2 results, comparison limits, and generated charts are in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ```bash
 cargo bench --bench policy_check
