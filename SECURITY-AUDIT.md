@@ -1,522 +1,556 @@
 # Security and hardening audit, 1.0.0
 
-**Status: 3 of 19 fixed on `main`, none released yet.** The two
-confirmed bypasses, items 1 and 2, are still open. `nitera 1.0.0` on
-crates.io has every finding below, including the three marked fixed,
-which are on `main` and unreleased.
+**Status: items 6, 12, and 16 are fixed on `main`, but unreleased as of
+the reviewed base `0a9367f` (2026-09-26).** Items 1, 2, and 18 remain
+confirmed policy bypasses. Item 18 is another instance of unresolved
+filesystem aliases, not an independent vulnerability class.
 
-The Status column tracks fixes in place, and each fix PR flips its own
-row in the same commit that lands it. Anything marked "fixed,
-unreleased" is on `main` but not in a published version.
+This document records findings and a corrected remediation plan. Updating
+the document does not fix the implementation. The original audit targeted
+the 1.0.0 source at `d730383`; commit `a09590a`, merged through PR #3,
+fixed the three items above. The fixed status refers to source on `main`,
+not the published 1.0.0 crate. Each implementation PR must update its own
+status and link its regression coverage; a release must record the first
+published version containing the fix.
 
-Both of those reproduce, and return the payload. A caller behind a
-narrow `allow` plus a broad `deny` can be made to read a protected
-file, and the second needs nothing created on disk at all. Details are
-in the sections below.
+## Evidence and limits
 
-Fixes are landing as separate, independently reviewable PRs. The
-sequencing table at the end gives the intended order. The findings
-themselves are not up for debate.
+An independent review of `d730383` built the crate and ran its existing
+suite: 149 tests passed. Separate local probes on a case-insensitive macOS
+filesystem nevertheless returned synthetic protected data through an
+allowed symlink, differently cased path, and `/tmp` alias. The probes also
+checked parser behavior, ignored arguments and ports, inherited environment,
+missing `HOME`, dotfile rejection, single-level directory creation, and
+the contradictory example policy. No real secrets or external network
+connections were needed. Those probes were outside the repository; each
+fix needs committed regression tests rather than relying on this record.
 
-Every claim here was checked by reading the code and, where marked
-"verified", by running a throwaway program against the v1.0.0 checkout.
-Those probe crates were deleted and are not part of the repository.
+The current source includes the three fixes and the test-fixture cleanup
+from PR #5. The source changes since the independently tested audit commit
+do not change the path bypasses. Windows behavior is supported by code
+inspection only; it has not been runtime-verified in this review.
 
-Latency figures refer to the baseline in `BENCHMARKS.md`: 375 ns median
-for `check()` at 1,000 rules, on an M2, release profile. Exactly one
-item in this audit moves that number, and it says so when you reach it.
+The 375 ns median at 1,000 rules in `BENCHMARKS.md` is a historical M2
+release-build measurement of the existing `check()` workload. It is not a
+measurement of any proposed fix or an end-to-end filesystem operation.
+Costs below identify where work occurs; they are not measured latency
+claims. No fix is assumed to have zero cost merely because it allocates
+nothing, and no fixed syscall count is assumed for canonicalization.
+
+## Threat model
+
+Nitera mediates operations that an application explicitly routes through
+its API. The relevant attacker can supply paths, commands, or hosts to
+that application; some scenarios also allow them to alter filesystem
+entries or influence the child-process environment. A wrapper must not
+authorize one name and access a different, denied resource.
+
+Nitera is not a sandbox for arbitrary hostile code in its own process.
+Such code can call operating-system APIs directly. Allowed child processes
+are not confined by Nitera's filesystem or network rules either. Fixing
+path authorization does not change those limits. Approval handlers make
+decisions; they do not provide operating-system isolation.
+
+Distinguish static alias attacks from concurrent filesystem replacement.
+Resolving a path and subsequently opening it can mitigate static aliases,
+but a separate check and syscall leave a TOCTOU race. Do not describe that
+partial mitigation as safe against an attacker who can replace directory
+entries between authorization and use.
 
 ## Verification summary
 
-Numbering here matches the section headings below, which is what the
-sequencing table at the end refers to.
+Numbering matches the detailed findings and sequencing table.
 
-| # | Finding | Class | How confirmed | Status |
+| # | Finding | Class | Evidence | Status |
 |---|---|---|---|---|
-| 1 | Symlink traversal bypasses narrow patterns and explicit denies | security | verified, payload returned | open |
-| 2 | Case-folding bypass on case-insensitive filesystems | security | verified, payload returned | open |
-| 3 | Windows path handling is broken | correctness | code inspection, needs a Windows host | open |
-| 4 | Comma in a path silently splits into two patterns | correctness | verified | open |
-| 5 | `#` in a path silently truncates the rule | correctness | verified | open |
-| 6 | Double space between action and kind breaks parsing | correctness | verified | fixed, unreleased |
-| 7 | Process arguments are not evaluated | model gap | verified | open |
-| 8 | Network port is not evaluated | model gap | verified | open |
-| 9 | Environment is inherited wholesale and is not policy-able | model gap | verified | open |
-| 10 | `read_dir`, `rename`, `copy`, symlink and metadata are not covered at all | model gap | verified | open |
-| 11 | `create_dir` is single level, with no `create_dir_all` | ergonomics | verified | open |
-| 12 | `Nitera::load(".nitera")` always fails | bug | verified | fixed, unreleased |
-| 13 | `HOME` is required even when no rule uses `~` | robustness | verified | open |
-| 14 | `NiteraOperationError::Denied` carries no request | auditability | verified | open |
-| 15 | Public enums are not `#[non_exhaustive]` | evolution | verified | open |
-| 16 | `Nitera` derives nothing, so no `Debug` | ergonomics | verified | fixed, unreleased |
-| 17 | Normalization failure becomes a silent never-match rule | latent | verified masked | open |
-| 18 | macOS `/tmp` versus `/private/tmp` aliasing | footgun | code inspection | open |
-| 19 | `examples/playground.nitersa` has a dead `allow host` line, see docs below | docs | verified | open |
+| 1 | Symlink traversal bypasses narrow allows and explicit denies | security | protected synthetic payload returned | open |
+| 2 | Case-insensitive filesystem names bypass case-sensitive denies | security | protected synthetic payload returned on macOS | open |
+| 3 | Windows path representation and HOME assumptions | correctness | source inspection; Windows execution required | open |
+| 4 | Commas cannot be represented literally in values | grammar limitation | parser output verified | open |
+| 5 | Hashes start comments even inside intended paths | grammar limitation | parser output verified | open |
+| 6 | Repeated whitespace between action and kind breaks parsing | correctness | original error reproduced; regression tests added | fixed, unreleased (#3) |
+| 7 | Process arguments are not evaluated | model gap | policy decisions verified | open |
+| 8 | Network ports are not evaluated | model gap | decisions for several ports verified | open |
+| 9 | Child environment and executable lookup are inherited | model gap | synthetic environment inheritance verified; lookup inspected | open |
+| 10 | Filesystem operation coverage is incomplete | model gap | public API inspected | open |
+| 11 | create_dir creates only one level | feature limitation | missing-parent error verified | open |
+| 12 | Bare .nitera filename rejected by load | correctness | original error reproduced; regression test added | fixed, unreleased (#3) |
+| 13 | HOME required for ordinary filesystem/process paths | robustness | isolated missing-HOME probe | open |
+| 14 | Denied error does not carry the request | auditability | error representation inspected | open |
+| 15 | Public types have compatibility constraints on extension | API evolution | type definitions inspected | open |
+| 16 | Nitera lacks Debug in 1.0.0 | ergonomics | implementation and regression test reviewed | fixed, unreleased (#3) |
+| 17 | Normalization errors become nonmatching patterns | latent hardening concern | missing-HOME scenario fails closed | open; no demonstrated bypass |
+| 18 | /tmp versus /private/tmp alias can bypass a deny | security, related to #1 | protected synthetic payload returned | open |
+| 19 | Example host allow is overridden by deny host * | documentation | resulting Deny verified | open |
 
-## P0, security bypasses
+## Security and platform correctness
 
 ### 1. Symlink traversal
 
-`normalize_path` in `src/policy/path.rs` is documented as purely lexical
-with no filesystem access, and `Nitera::read` and friends pass the same
-unresolved string to both the policy check and the underlying syscall.
-A symlink inside an allowed directory therefore points outside it, and
-the check never sees the difference.
+`normalize_path` is lexical. `Nitera::read` and other wrappers authorize
+the unresolved path and pass it to the operating system, which follows
+symlinks. With `allow read ./allowed/**` and `deny read ./Secrets/**`,
+an `allowed/escape -> ../Secrets` link lets `read("./allowed/escape/key")`
+return the protected payload while `read("./Secrets/key")` is denied.
 
-Verified with a policy of `allow read ./allowed/**` plus an explicit
-`deny read ./secret/**`, and a symlink `allowed/escape -> secret`:
+**Corrected approach.** Define a shared, operation-aware path authorization
+layer for guarded filesystem operations and process working directories.
+Resolve request paths and literal policy anchors consistently; normalizing
+requests alone can leave denies attached to an alias that never matches.
+Do not canonicalize an entire wildcard string as if it were a filename.
+Specify how wildcard portions interact with aliases, and reject unsupported
+policy/topology combinations instead of silently discarding deny rules.
 
-```
-check() verdict: Allow
-read() SUCCEEDED, returned: TOP SECRET KEY MATERIAL
-```
+For an existing read/write target, authorize the resolved target. For a
+new entry, resolve and authorize its parent plus the final component;
+keep exclusive creation and reject dangling-link or unsupported-parent
+cases explicitly. Do not blindly canonicalize the final component for
+`delete`: removing a symlink is different from deleting its target.
+Working-directory authorization must address symlink aliases as well.
 
-The explicit deny did not fire. `README.md` currently describes this as
-"not currently handled as a separate security boundary", which
-understates it: it defeats the narrow `allow` patterns that
-`DOCUMENTATION.md` correctly identifies as the actual security boundary.
+Keep lexical `check()` documented as advisory unless it is deliberately
+changed to perform resolution. Guarded methods must use the resolved,
+fallible authorization path themselves, not trust an earlier lexical
+verdict. Resolution failures must stop the operation, never fall back to
+the unresolved name. Any optional lexical-only mode must be explicitly
+advisory; it cannot serve as the hardened default for guarded operations.
 
-**Approach.** Resolve the deepest existing ancestor of the request path
-with a single `canonicalize`, then re-append the non-existent tail. This
-is the standard realpath technique, it works for paths that do not exist
-yet (which `create` requires), and it needs no new dependency.
+Canonicalizing an existing ancestor and appending a missing tail is only
+a static-alias mitigation. Concurrent replacement requires an appropriate
+handle/capability-based backend that ties authorization to the resource
+actually used. Evaluate platform primitives or a maintained capability
+library; merely adding a dependency or a canonicalize call is not proof
+of race resistance. Either implement and test that boundary or explicitly
+exclude attacker-writable namespace races from the supported guarantee.
 
-**Cost.** One filesystem syscall per filesystem operation, so roughly
-1 to 2 microseconds added to a check that currently costs 375 ns. That
-is real, and it is the one place in this plan where latency genuinely
-moves. Two mitigations:
+**Required checks.** Existing file and directory symlinks, explicit denies,
+relative and absolute policy anchors, symlinked working directories,
+missing parents, dangling links, symlink loops, and delete-link versus
+delete-target behavior. For a race-resistant claim, include adversarial
+replacement tests against the selected backend. Include item 18's probe.
 
-- The guarded syscall it protects (`open`, `read`, `write`) already costs
-  single-digit microseconds, so the overhead stays well under the cost of
-  the operation being guarded.
-- Gate it behind a policy directive rather than a compile-time feature, so
-  a caller who only needs `check()` semantics can opt out and keep the
-  fast path. Suggested grammar, added to the existing section model:
+**Cost and scope.** Filesystem resolution adds I/O and varies with platform,
+path depth, caches, and filesystem. Rust's `canonicalize` uses Unix
+`realpath` or Windows APIs; one Rust call is not a guarantee of one syscall.
+Measure end-to-end guarded operations separately from lexical `check()`.
+This is a substantial security change, not a one-helper patch.
 
-  ```text
-  [security]
-  resolve_symlinks = true
-  ```
+### 2. Case-folding and equivalent filesystem names
 
-  Default `true`, because a security control that is off by default is
-  not a control. A `false` value is only defensible for callers that treat
-  the policy as advisory.
+With `deny read ./Secrets/**` and `allow read ./**`, requesting
+`./secrets/key` returned the protected payload on a case-insensitive
+volume. An attacker can choose the alternate spelling; the policy author
+does not have to mistype the rule. No new symlink is required.
 
-**Complexity.** Low to moderate. The resolution helper is self-contained
-and unit-testable. The risk is introducing a TOCTOU window between
-resolve and open, which already exists today in a worse form; the honest
-position is that this narrows the window, it does not close it. Closing
-it properly needs descriptor-relative syscalls, which is `cap-std`'s job,
-not this crate's.
+**Corrected approach.** Use the relevant filesystem's name-equivalence
+semantics in the path authorization layer, with explicit supported-platform
+and topology guarantees. A flag obtained by creating one file at the policy
+root does not cover absolute paths on other volumes, mounted subtrees,
+read-only roots, or directory-specific Windows case sensitivity. Probe
+failure must never silently select case-sensitive enforcement.
 
-**Benchmark consequence.** `BENCHMARKS.md` will need a second harness that
-measures authorize-plus-resolve, not just `check()`. Reporting a single
-375 ns number once resolution is in the path would be misleading. This
-should be done in the same PR as the fix, not deferred.
+Both the public matcher and the loaded policy's prepared matcher must
+implement the same semantics. `PreparedPath` performs its own equality,
+byte checks, prefix stripping, and glob comparisons. `PathSet` sorts and
+selects candidates with byte-sensitive comparisons. Updating only
+`component_matches` leaves the normal loaded-policy path vulnerable.
+The index must not exclude any candidate that the final matcher could
+match; disable an incompatible optimization until it is correct.
 
-### 2. Case-folding bypass
+Do not lowercase every path globally: that can broaden allow rules on a
+case-sensitive filesystem. `eq_ignore_ascii_case` is only an ASCII subset,
+not Windows or macOS filesystem equivalence. Unicode normalization and
+case handling are platform/filesystem concerns, not a problem solved by
+arbitrary locale-sensitive lowercasing. Reject unsupported cases in a
+hardened mode rather than declaring an ASCII-only mitigation complete.
 
-`component_matches` in `src/policy/matcher.rs` is byte-exact
-(`pattern == value`), while macOS filesystems are case-insensitive by
-default and Windows always is. A deny written with different
-capitalization than the caller's path does not match, while a broad
-allow does, and the filesystem opens the real file.
+**Required checks.** Exact, subtree, and wildcard deny/ask/allow patterns;
+small scans and indexed sets with at least 64 diverse rules; alternate
+ASCII casing; non-ASCII and normalization-equivalent names where supported;
+case-sensitive directories; read-only roots; and mixed-volume paths.
+Check results against actual filesystem identity as well as parity between
+public and prepared evaluators. Two matching implementations can share a bug.
 
-Verified on a case-insensitive volume with `deny read ./Secrets/**` plus
-`allow read ./**`:
-
-```
-check() -> Allow
-read() -> Ok, returned: CASING BYPASS PAYLOAD
-```
-
-This is arguably the more dangerous of the two, because it needs no
-attacker-created filesystem object. It only needs a policy author to
-write `.SSH` where the caller writes `.ssh`, which is an everyday
-mistake.
-
-**Approach.** Detect case sensitivity once, at load, by writing a probe
-file and checking whether a case-flipped name resolves. Store the result
-on the prepared policy. Then compare with `eq_ignore_ascii_case` when
-insensitive.
-
-**Cost.** Effectively zero. `eq_ignore_ascii_case` allocates nothing, and
-the detection is one extra file create plus stat at load time, not per
-check.
-
-**Complexity.** Low, and it is a small localized change to one function
-plus a flag threaded through. This is the best ratio in the whole plan.
-
-**Known limit to document.** ASCII case folding is not full Unicode case
-folding. It closes the realistic bypasses (`.SSH`, `Secrets`, `README`)
-and matches Windows' ordinal-ignore-case model. macOS performs Unicode
-normalization, so exotic cases involving combining marks remain open.
-Documenting that is honest; solving it needs locale-aware folding, which
-is a large dependency and a genuine complexity spike, so it is out of
-scope.
+**Cost and scope.** Unmeasured. Comparison, key preparation, platform queries,
+and index design can affect load time and checks. This depends on item 1's
+path model and requires platform-specific tests, not a one-function fix.
 
 ### 3. Windows path handling
 
-`normalize_pattern` splits the pattern string on `/` and rebuilds it as
-`format!("/{}", ...)`, and the prepared matcher splits and joins on `/`
-as well. On Windows, `to_string_lossy()` yields `\`, so an absolute
-pattern collapses into a single component and gains a spurious leading
-`/`, which cannot match a request path produced the same way.
+`normalize_pattern` splits on `/` and constructs a leading `/`, whereas
+Windows paths can contain backslashes, drive/UNC prefixes, and extended
+path syntax. Request and pattern representations can consequently differ.
+The unconditional HOME requirement is another obstacle. These findings are
+from source inspection; Windows support needs execution on a Windows host.
 
-Combined with finding 11 (`HOME` is required unconditionally, and Windows
-routinely has no `HOME`), the practical result is that Windows is
-unsupported today, while `src/policy/path.rs` contains explicit
-`#[cfg(not(unix))]` branches implying otherwise.
+**Corrected approach.** Define a platform-aware internal path representation
+used by both patterns and requests. Preserve drive and UNC identity;
+distinguish drive-relative, rooted, absolute, and extended-length paths.
+Separator conversion may be part of that boundary, but cannot replace
+prefix semantics. Reject unsupported namespaces explicitly. Never convert
+backslashes on Unix, where they can be literal filename characters.
+Integrate platform case behavior and item 13's home-directory handling.
 
-**Approach.** Normalize separators once at the boundary (`\` to `/` on
-Windows, before pattern and request processing) so the rest of the engine
-keeps a single canonical form. That is a smaller change than making the
-whole engine separator-agnostic.
+**Required checks.** A Windows CI runner covering drive-relative and absolute
+paths, mixed separators, UNC and extended paths, traversal, missing HOME,
+and case-sensitive directories. Verify checks and real guarded operations.
+Costs are unmeasured; per-request conversion is runtime work.
 
-**Cost.** Zero per check. The conversion happens at load for patterns and
-once per request for paths, and the request path is already being turned
-into a `String`.
+## Policy grammar
 
-**Complexity.** Moderate, and it cannot be validated properly without a
-Windows CI runner. That is the main blocker, not the code.
+### 4. Commas in paths
 
-## P1, silent policy corruption
+`parse_values` splits `./a,b/**` into `./a` and `b/**`. That follows the
+current comma-list grammar, but cannot express the intended literal path.
+A mistaken deny may leave data accessible under another allow.
 
-All three produce a policy that is accepted, is different from what was
-written, and reports no error. A corrupted `deny` is a fail-open.
+### 5. Hashes in paths
 
-### 4. Comma in a path
+The comment pass turns `./a#b/**` into `./a`. This is documented syntax,
+but there is no literal escape. Items 4 and 5 are expression limitations
+with potential policy consequences, not corruption of every valid policy.
 
-`parse_values` splits on commas and drops empties, so
-`allow read ./a,b/**` parses successfully as two patterns, `./a` and
-`b/**`. Verified. A path containing a comma cannot be expressed, and the
-mistake is silent.
+**Corrected approach for 4 and 5.** Add a quote-aware lexer before comment
+removal. Split commas and recognize comments only outside quoted values;
+support explicit escapes for quotes and backslashes and reject malformed
+input with line information. Keep spaces within a quoted value intact.
+Changing only `parse_rule` or `parse_values` is insufficient because
+`parse()` currently strips comments first.
 
-### 5. `#` in a path
+Use an explicit grammar-version/migration decision: existing bare values
+can contain quote characters literally. Do not promise universal backward
+compatibility while reinterpreting those values. Preserve legacy parsing
+where promised and reject unsupported new syntax clearly.
 
-The comment strip runs before rule parsing, so `allow read ./a#b/**`
-parses as `./a`. Verified. A `deny` written this way is silently weaker
-than intended. This is documented, but "you cannot express this" and
-"this silently changes your policy" are very different failure modes.
+**Required checks.** Quoted commas, hashes, spaces, empty values, escaped
+quotes/backslashes, mixed quoted/unquoted lists, comments after values,
+unbalanced quotes, and legacy values containing quote characters. Verify
+resulting deny/ask/allow decisions, not just successful parsing.
+Parsing costs occur at load time; benchmark unusually large policies if
+needed. Existing checks need not gain extra parsing work.
 
-**Approach for 4 and 5 together.** Add a single explicit quoting rule to
-the format rather than two special cases: a value may be wrapped in
-double quotes, in which case it is taken verbatim with no comma splitting
-and no comment stripping. That is one small change in `parse_rule` and
-`parse_values`, it is backwards compatible because bare values keep
-current behavior, and it gives an escape hatch for both problems plus any
-future one. Reject unbalanced quotes with a `ParseError` naming the line.
+### 6. Whitespace between action and kind — fixed, unreleased
 
-**Cost.** Zero per check, since quoting is resolved at parse time and the
-prepared representation is unchanged.
+The 1.0.0 `splitn(3, char::is_whitespace)` parser rejects `allow  read ./a`
+because it produces an empty kind. This fails parsing; unlike items 4 and
+5, it does not silently accept a different policy.
 
-**Complexity.** Low. The risk is under-testing, so the PR needs parser
-tests for quoted commas, quoted hashes, spaces inside quotes, and
-unbalanced quotes.
+Commit `a09590a` extracts the first two fields while skipping separators,
+then preserves the complete remainder as the values field. Keep that fix.
+Do not substitute `split_whitespace().take(3)`: it loses `./b` and `./c`
+from `deny read ./a, ./b, ./c`, potentially weakening the deny.
 
-### 6. Double space between action and kind
+**Coverage to preserve.** Repeated spaces, mixed tabs/spaces, missing kind,
+and comma-separated values with spaces. Track the first released version;
+no replacement implementation is needed.
 
-`parse_rule` uses `splitn(3, char::is_whitespace)`, which yields an empty
-middle field for `allow  read ./a`, producing
-`line 2: unknown filesystem operation: ` with a blank name. Verified.
-Tabs, leading indentation, and a double space before the value all work
-correctly, so this is one narrow hole rather than a general fragility.
-
-**Approach.** Replace `splitn(3, char::is_whitespace)` with
-`split_whitespace().take(3)`, or filter empty fields before indexing.
-This also deletes code rather than adding it.
-
-**Cost.** Zero. **Complexity.** Trivial. This should be its own small PR
-because it is a three-line change with no interaction with anything else
-in this plan.
-
-## P2, model gaps
-
-These are feature gaps rather than defects. Each one widens what a policy
-can express, so each needs a grammar decision and a migration story for
-existing files. None of them adds per-check cost, since all the work
-happens at parse and prepare time.
+## Model and API extensions
 
 ### 7. Process arguments are not evaluated
 
-`Policy::evaluate` destructures `Target::Process { command, args: _, cwd }`.
-`allow command git` therefore allows `git -c core.pager=sh log`, verified.
-`DOCUMENTATION.md` states this correctly, but the consequence deserves to
-be stated louder: allowing `git`, `cargo`, `sh`, `python`, or `npm` is
-allowing arbitrary code execution, because each accepts arguments that
-execute other programs.
+Both evaluators authorize command names and working-directory scope, not
+arguments. `git -c core.pager=sh log` receives Allow under `allow command
+git`; that verdict does not prove this exact command launches a pager in
+every environment. General interpreters/build tools can execute arbitrary
+code, and an allowed process can access resources outside Nitera wrappers.
 
-**Approach.** Add an optional argument predicate to command rules rather
-than changing the meaning of existing rules, so old files keep working:
+**Corrected approach.** Add an explicit, versioned command-rule form that
+can match a command identity and exact argv vectors. Do not reinterpret
+`allow command git status, diff`: today it names two commands, `git status`
+and `diff`. Preserve unrestricted legacy command rules as unrestricted.
+A narrower allow does not constrain a coexisting unrestricted allow;
+migration must remove broad grants when restrictions are intended.
+
+Apply deny, then ask, then allow across applicable rules, and enforce cwd
+scope independently. Define no-argument and empty-argument behavior without
+joining argv into a shell string. Argument restrictions do not sandbox an
+allowed program's descendants or inputs. Coordinate executable identity
+with item 9.
+
+**Required checks.** Exact vectors, empty arguments, executable mismatch,
+command-level deny overriding argument-level allow, ask precedence, broad
+legacy allows, and out-of-scope cwd. Argument matching adds runtime work;
+measure it rather than calling it free.
+
+### 8. Network ports are not evaluated
+
+`allow host api.github.com` permits any port at the policy layer. Local
+probes confirmed Allow for 22, 443, 5432, and 6379 without opening sockets.
+
+**Corrected approach.** Add an unambiguous endpoint rule with optional port
+constraints; preserve legacy host-only rules as any-port grants. Define
+numeric ranges and IPv6 bracket syntax explicitly, and match host plus
+port in both policy paths. Define hostname equivalence as well: DNS names
+are not byte-case-sensitive, and alternate spelling must not skip a deny.
+Do not turn a hostname allow into an implied IP-address or protocol policy.
+
+Hostname authorization alone does not filter resolved addresses, including
+loopback/private addresses. Address restrictions, if promised, must resolve,
+validate, and connect to the selected address without a second resolution.
+The returned `TcpStream` has no application-protocol policy. It does not
+automatically follow HTTP redirects; an application must authorize any
+new redirected connection separately.
+
+**Required checks.** Allowed/disallowed ports, legacy any-port behavior,
+precedence, invalid ranges, IPv6, hostname casing, and controlled local
+connections. Port checks add small but nonzero work. DNS/address enforcement
+is a separate capability and needs its own tests and measurements.
+
+### 9. Environment and executable lookup
+
+`execute` inherits environment variables and uses `Command::new` lookup.
+A synthetic variable was visible to an allowed child. An attacker who
+controls PATH can influence which executable a bare command name selects.
+
+**Corrected approach.** Offer an explicit child-environment policy with a
+documented base environment and allow/deny lists. Construct children using
+`env_clear` plus approved entries. Preserve legacy inheritance behind an
+explicit compatibility mode or make the changed default a major-version
+decision. Do not expose variable values in audit logs by default.
+
+Executable resolution must also be specified: bind rules to approved
+absolute executables, or resolve through a fixed trusted search path and
+authorize that result. Environment filtering alone does not establish
+executable identity. Do not mutate the host process's global environment
+to launch a child.
+
+**Required checks.** Synthetic secrets, allow/deny collisions, missing PATH,
+a test executable shadowing a trusted name, absolute executables, required
+platform environment variables, and unchanged parent environment.
+Environment assembly affects launch cost, not merely policy parsing.
+
+### 10. Missing filesystem wrappers
+
+The guarded API includes read, write, delete, create, and create_dir. It
+has no separate read_dir, rename, copy, symlink, metadata, or append API.
+`write` already truncates existing files. A missing wrapper is an API gap,
+not a demonstrated bypass through an existing method; direct `std::fs`
+access has always been outside this library's mediation.
+
+**Corrected approach.** Add explicit operation semantics incrementally.
+Listing requires authorization for the directory; metadata must specify
+whether links are followed. Rename requires source and destination rules
+and an explicit replacement policy. Copy requires source-read and
+destination-write/create permissions. Reuse the resolved authorization
+layer and propagate deny/ask decisions for every affected resource before
+performing an operation. Do not silently bypass denied destinations.
+
+**Required checks.** Source/destination combinations, existing-target
+replacement, cross-filesystem errors, aliases, and unresolved approvals.
+Existing methods need not change cost; each new method has its own checks.
+
+### 11. Recursive directory creation
+
+`create_dir` is deliberately single-level; a missing parent yields an I/O
+error. Adding `create_dir_all` is a feature, not a correction to that API.
+
+**Corrected approach.** Authorize every missing directory the operation
+would create. Authorizing only the deepest path is insufficient: default
+deny cannot protect intermediate mutations that are never checked.
+Resolve existing ancestors using item 1's rules, keep creation relative
+to the authorized parent, and define behavior under concurrent changes.
+Specify partial success and approval behavior; do not imply atomicity or
+remove directories that another actor may now be using during rollback.
+
+**Required checks.** Denied intermediate ancestor with allowed leaf,
+existing parents, per-level ask decisions, file/link collisions, and a
+failure after one directory was created. Work scales with depth.
+
+## Robustness and compatibility
+
+### 12. Dotfile policy loading — fixed, unreleased
+
+In 1.0.0, the extension guard rejects `.nitera` because a leading dot does
+not constitute a file extension. Commit `a09590a` accepts either the exact
+filename `.nitera` or an extension of `nitera`, retaining rejection of
+`.nitera.bak` and unrelated extensions. Preserve that implementation and
+its tests; record the first release containing it. The original README
+example failed at this loading step, regardless of its other prerequisites.
+
+### 13. HOME required without tilde expansion
+
+Filesystem and process path resolution require HOME even for ordinary
+paths. With HOME absent, guarded reads return an I/O error and checks deny.
+Network checks do not have this dependency, so the entire crate is not
+uniformly unusable without HOME.
+
+**Corrected approach.** Resolve home only for a supported home-relative
+form (`~` or `~/...`, plus explicitly defined platform equivalents).
+Separate pattern and request resolution from unconditional environment
+lookup. Define a platform home-provider contract rather than assuming
+Windows always supplies HOME.
+
+Crucially, an unresolved home-relative deny must not become a nonmatch
+while an ordinary allow starts working. Reject such a policy at load, or
+return an authorization error/Deny when it cannot be evaluated. Preserve
+the current documented response to HOME changes, or introduce an explicit
+versioned immutable-home contract; do not accidentally freeze old denies.
+Review item 17 in the same change.
+
+**Required checks.** HOME absent with ordinary rules; absent with a
+home-relative deny plus broad allow; set, unset, or changed after loading;
+and public/prepared evaluator parity. Run environment changes in isolated
+processes. Any speedup remains unmeasured.
+
+### 14. Denied errors lack request context
+
+`NiteraOperationError::Denied` is fieldless; `Ask` carries a `NiteraRequest`.
+Applications can log their inputs, but the denied error alone cannot
+identify the operation.
+
+**Corrected approach.** For a compatible extension, add an optional audit
+callback that receives the request and decision before the context is
+discarded. Define privacy, callback failure, and reentrancy behavior. An
+error-carried request is an alternative for a deliberate breaking API
+release, with migration examples.
+
+Adding `DeniedRequest(NiteraRequest)` is not source-compatible with
+downstream exhaustive matches. A `request()` accessor on the current
+fieldless `Denied` can only return None; it cannot recover discarded data
+and is not a fix by itself. The request type is `NiteraRequest`.
+
+**Required checks.** Denied operation context, approval denial, no callback
+on unrelated operations, and documented logging/redaction behavior.
+Callbacks and any request copies add runtime cost; measure if enabled.
+
+### 15. Public type evolution
+
+Public exhaustive enums make new variants a breaking change. Adding
+`#[non_exhaustive]` now also breaks external exhaustive matches. This is
+an API design decision, not a current security vulnerability.
+
+**Corrected approach.** Review NiteraError, NiteraOperationError, Decision,
+Resource, Operation, CreateKind, and Target individually in a major-version
+plan. `ParseError` is a struct: applying the attribute also affects external
+construction and destructuring. Do not blanket-annotate public types or
+label a breaking release safe because adoption is small.
+
+**Required checks.** Downstream compile examples for matching, construction,
+and migration, alongside release notes. This attribute itself does not add
+runtime matching work.
+
+### 16. Debug — fixed, unreleased; Clone is separate
+
+Commit `a09590a` adds a manual Debug implementation that exposes the policy
+root and handler-registration state without formatting the handler or
+prepared policy. Preserve it and the regression coverage. PR #5 also
+cleans up both temporary policy files used by the test.
+
+`Arc<dyn ApprovalHandler>` does not inherently prevent Clone: cloning an
+Arc shares the allocation without requiring the handler to implement
+Clone. PreparedPolicy currently lacks Clone. Adding Clone is a separate
+feature that must define whether policy state and callbacks are shared;
+it is unnecessary to implement Debug.
+
+### 17. Normalization failure and fail-closed behavior
+
+PreparedPath uses `Tail::Never` on normalization failure and public
+PathPattern matching returns false. That representation is a hardening
+concern if a failed deny can coexist with a successful allow.
+
+The tested missing-HOME scenario is not currently a demonstrated bypass.
+While HOME is absent, path authorization fails closed; if HOME changes,
+PreparedPolicy deliberately falls back to the source evaluator. This is
+documented and tested behavior, not protection established only by accident.
+
+**Corrected approach.** Preserve those guarantees while changing item 13.
+Prefer fallible policy preparation that rejects unresolved enforcement
+rules, with contextual diagnostics. A future fallible public matcher must
+propagate errors through evaluators as denial/failure, not `unwrap_or(false)`
+for deny lists. A warning alone is insufficient if a deny becomes inactive.
+Assess the API compatibility of returning Result before changing it.
+
+**Required checks.** An invalid/unresolved deny plus a broad allow must
+never return Allow in either evaluator, including after environment changes.
+
+### 18. macOS /tmp aliases can bypass deny rules
+
+The loader canonicalizes a policy's parent, but ordinary absolute request
+paths are matched lexically. This can cause false denials under narrow
+allows and can also fail open under broader allows. It is not merely a
+documentation issue.
+
+The following policy was tested under `/tmp/<fixture>/policy.nitera`:
 
 ```text
-allow command git
-allow command git status, diff
+[filesystem]
+allow read /**
+deny read ./**
 ```
 
-Comma splitting already exists, so this reuses the existing shape. Exact
-argv matching is honest and predictable; a glob or regex grammar here
-would be a real complexity spike and is not recommended.
+The root becomes `/private/tmp/<fixture>`. Reading `./key` is denied;
+reading `/tmp/<fixture>/key` returns the same synthetic protected payload.
+The alias skips the canonical-root deny and matches the broad allow.
 
-**Cost.** Zero per check beyond a string compare that only runs for
-process requests. **Complexity.** Low in the parser, moderate in the
-evaluator, because argv needs its own matcher and its own precedence
-interaction with command-level deny.
+**Corrected approach.** Include this in item 1's shared alias-resolution
+work. Canonicalize compatible policy anchors and authorize the resource
+actually used; do not rely on users spelling every alias canonically.
 
-### 8. Port is not evaluated
+**Required checks.** Both spellings, relative and absolute denies, broad
+allows, and supported operations. Run the actual alias case on macOS and
+an explicit directory-symlink analogue where the /tmp alias is absent.
 
-`Target::Network { host, port: _ }`, so `allow host api.github.com`
-permits 443, 22, 5432, and 6379 alike, verified. Also worth noting that
-`connect` returns a raw `TcpStream`, so once the single check passes the
-caller can do anything at all with the socket.
+### 19. Contradictory example policy
 
-**Approach.** Make port part of the host pattern grammar as an optional
-suffix, `host:port`, defaulting to any port when absent. This keeps
-existing `allow host api.github.com` files working and unchanged in
-meaning.
+`examples/playground.nitera` contains `allow host api.github.com` followed
+by `deny host *`. Since deny wins, the allow is ineffective. The filename
+is `.nitera`, not `.nitersa`.
 
-**Cost.** Zero. **Complexity.** Low. The honest limit to document is that
-host-based control is DNS-dependent and trivially defeated by a resolver
-or a redirect; it is a policy expression, not egress filtering.
+**Corrected approach.** If the example is intended to allow GitHub, remove
+the catch-all deny and rely on default deny for unmatched hosts. Otherwise
+remove the ineffective allow and explain the all-denied example. Keep the
+example and its narrative consistent. Verify GitHub and an unmatched host
+with local policy checks; no external connection is needed.
 
-### 9. Environment
+## Separate feature requests
 
-Verified: `execute("env", ...)` returned `SECRET_TOKEN=super-secret-value`
-and the full `PATH`. There is no env rule kind at all, and command lookup
-inherits `PATH`, so whoever controls `PATH` controls what `git` means.
+- Handler replacement is an API/lifecycle choice. A setter taking `&mut
+  self` does not by itself allow replacement through shared Arc references.
+- Reload/watch support needs explicit snapshot and concurrent-reader
+  semantics; existing snapshot behavior is documented, not a defect.
+- Blocking operations can use a blocking pool from async applications.
+  Timeouts, cancellation, bounded output, and native async support are
+  separate features; lack of an async API does not make every use invalid.
 
-**Approach.** Add `[process] env` allow and deny lists plus a fixed base
-environment, then have `execute` call `env_clear` and set only what the
-policy permits. This is a behavior change for existing policies, so it
-needs a major version or an opt-in flag. Recommend opt-in first.
+## Implementation order and acceptance gates
 
-**Cost.** Zero per check. **Complexity.** Low in isolation, but it changes
-`execute` semantics, so it is the item most likely to surprise.
+Keep fixes independently reviewable, but do not split a security invariant
+across changes that temporarily allow requests the policy should deny.
 
-### 10. Missing filesystem operations
+| Order | Items | Deliverable and acceptance gate |
+|---|---|---|
+| Already merged | 6, 12, 16 | Preserve fixes from #3 and test cleanup from #5; track release status. |
+| 1 | 1, 2, 3, 18 | Commit isolated bypass regressions and a platform/path semantics contract; distinguish static-alias mitigation from race resistance. |
+| 2 | 1, 18 | Implement shared, operation-aware resolved authorization; pass symlink, alias, creation, deletion, and cwd checks; benchmark guarded operations. |
+| 3 | 2, 3 | Enforce supported filesystem name equivalence through both matchers and candidate indexes; reject unsupported enforcement modes; run platform tests. |
+| 4 | 13, 17 | Remove unnecessary home lookup without permitting unresolved deny rules; pass isolated environment-transition tests. |
+| 5 | 4, 5 | Approve a versioned quote/escape grammar; preserve or explicitly migrate legacy values; pass parsing and decision regressions. |
+| 6 | 19 | Correct the example and verify intended host decisions. This independent docs fix may land earlier. |
+| 7 | 14, 15 | Choose compatible audit events or a breaking error/type release, with downstream migration tests. |
+| 8 | 7, 8, 9 | Add explicit argv, endpoint, environment, and executable semantics; preserve legacy unrestricted grants unless a migration changes them. |
+| 9 | 10, 11 | Add filesystem operations with every affected resource authorized, after the shared path layer is ready. |
 
-The guarded set is read, write, delete, create, create_dir. There is no
-`read_dir`, `rename`, `copy`, symlink creation, metadata read, truncate,
-or append. `read_dir` is the notable omission, because a caller that can
-list a directory can enumerate the entire filesystem with no policy check
-at all. `rename` is the notable risk, because moving a file into an
-allowed directory is a classic way to launder content past a write check.
+Path fixes must carry tests for the bypasses they claim to close, plus
+negative cases proving legitimate denies remain effective. A green existing
+suite is not sufficient: all 149 original tests passed while the bypasses
+were reproducible. Platform-specific tests must report skipped coverage
+honestly rather than treating it as a successful security verification.
 
-**Approach.** Add `list`, `rename`, and `metadata` first, since they close
-real gaps, and give `rename` both a source and a destination check.
-Defer `copy` and symlink creation, which need a destination-side story
-too. Keep each as a separate method rather than a trait, to match the
-existing API shape and avoid a breaking redesign.
+Measure lexical checks, preparation, and end-to-end guarded operations
+separately. Record workload, platform/filesystem, build profile, and cache
+conditions. Do not promise +1–2 microseconds, one syscall, zero overhead,
+or unchanged latency before measuring the actual implementation.
 
-**Cost.** Zero for existing operations. **Complexity.** Moderate, mostly
-because of path-pair semantics for `rename`.
+## References and reporting
 
-### 11. `create_dir` is single level
+- [Original audit commit](https://github.com/IshitRaj/nitera/commit/d73038332382140773f76ee0beee23a11d8024a6)
+- [Three merged fixes](https://github.com/IshitRaj/nitera/commit/a09590af4ebdcb62881ff8ef1c9d073839b02e92)
+- [Rust canonicalize platform behavior](https://doc.rust-lang.org/stable/std/fs/fn.canonicalize.html)
+- [Windows per-directory case sensitivity](https://learn.microsoft.com/en-us/windows/wsl/case-sensitivity)
+- [Arc cloning semantics](https://doc.rust-lang.org/std/sync/struct.Arc.html)
 
-Verified: `create_dir("./build/a/b")` returns
-`io error: No such file or directory`. There is no `create_dir_all`, so
-building a nested tree takes N calls, and each one is separately gated and
-separately promptable under an `ask` rule.
-
-**Approach.** Add `create_dir_all` that authorizes every prefix it
-creates, or authorizes the deepest path and relies on default deny for
-the rest. The first is more correct and costs one extra check per level.
-
-**Cost.** Negligible. **Complexity.** Low.
-
-## P3, robustness and ergonomics
-
-### 12. `Nitera::load(".nitera")` always fails
-
-The guard is `path.extension() == Some("nitera")`, and
-`Path::new(".nitera").extension()` is `None`, because a leading dot reads
-as a hidden file with no extension. Verified. This is the exact filename
-in the README quick start, so the headline example cannot work.
-`prod.nitera` loads fine.
-
-**Approach.** Accept either a `nitera` extension or a file named exactly
-`.nitera`. One line. **Cost.** Zero. **Complexity.** Trivial. Fix first,
-before anything else, because it is a documentation bug in the shipped
-README.
-
-### 13. `HOME` required unconditionally
-
-`resolve_runtime_path` calls `var_os("HOME")` and errors if it is unset,
-even for a path with no `~` in it, and the operation then fails with
-`Io` before any policy check runs. `DOCUMENTATION.md` notes it, but the
-effect is that nitera is unusable in a minimal container and broken on
-Windows, where `HOME` is often unset.
-
-**Approach.** Require `HOME` only when the path or pattern actually
-starts with `~`. This also removes an environment scan from the common
-path, so it is a small latency win rather than a cost.
-
-**Cost.** Slightly negative, a small win. **Complexity.** Low.
-
-### 14. `Denied` carries no request
-
-`NiteraOperationError::Denied` is a fieldless variant, while `Ask` carries
-the full `NitraRequest`. That is an awkward asymmetry for audit logging,
-since a denied operation leaves no record of what was attempted.
-
-**Approach.** Add a new variant `DeniedRequest(NiteraRequest)` rather than
-changing `Denied`, so existing `match` arms keep compiling, and have the
-operations return the new variant. Alternatively add a `request()` accessor
-returning `Option<&NitraRequest>` on the error type, which is additive and
-breaks nothing.
-
-**Cost.** Zero. **Complexity.** Low. Recommend the accessor, since it is
-strictly additive.
-
-### 15. No `#[non_exhaustive]`
-
-None of the public enums carry it, so adding a variant later is a breaking
-change. At roughly 25 lifetime downloads, the cost of adding it now is
-near zero and the cost of deferring is a 2.0.
-
-**Approach.** Add `#[non_exhaustive]` to `NiteraError`,
-`NiteraOperationError`, `Decision`, `ParseError`, and `NiteraRequest`'s
-associated enums. **Cost.** Zero. **Complexity.** Zero, but it *is*
-technically breaking for downstream `match` expressions, so it belongs in
-a clearly labelled release rather than a patch.
-
-### 16. `Nitera` derives nothing
-
-No `Debug`, so it cannot be logged or embedded in a struct that derives
-`Debug`. `Clone` is also absent because of the `Arc<dyn ApprovalHandler>`
-field, which is inherent and fine.
-
-**Approach.** Hand-write a `Debug` impl that prints the root and whether a
-handler is registered, and deliberately omits the handler. **Cost.** Zero.
-**Complexity.** Trivial.
-
-### 17. Silent never-match on normalization failure
-
-`PreparedPath::new` returns `Tail::Never` when `normalize_pattern` fails,
-and the public `PathPattern::matches_from` returns `false` on the same
-failure. A `deny` rule in that state silently stops matching.
-
-I suspected this was an exploitable fail-open via a `~` rule with `HOME`
-unset at load, tested it, and **it does not reproduce**: `PreparedPolicy`
-captures `HOME` at load and falls back to the unindexed evaluator whenever
-it differs, which re-normalizes successfully and denies correctly. The
-fallback masks the hazard by accident rather than by design.
-
-**Approach.** Do not treat this as a live bug. Log a warning at load time
-for any pattern that failed to normalize, and make the public
-`matches_from` fail closed for `deny`-shaped use by returning a `Result`
-in a future major. Low priority, worth a comment in the code so nobody
-removes the `HOME` fallback without noticing what it is holding up.
-
-### 18. macOS `/tmp` aliasing
-
-`Nitera::load` canonicalizes the policy's parent into `root`, so a policy
-at `/tmp/p/prod.nitera` gets root `/private/tmp/p`. A pattern written
-relatively normalizes against the canonical root, but an already-normalized
-absolute request path is borrowed as-is by the fast path in
-`resolve_runtime_path`, so `/tmp/p/x` never matches
-`/private/tmp/p/**`. This fails closed, so it is a confusion issue rather
-than a bypass.
-
-**Approach.** Document it, and note in the policy-authoring guide that
-absolute patterns should be written in canonical form. **Complexity.** Low,
-documentation only.
-
-### 19. Smaller items
-
-- `with_approval_handler` consumes `self`, so a shared `Nitera` cannot
-  swap handlers. A `set_approval_handler(&mut self, ...)` alongside the
-  builder method is a small, useful addition.
-- No policy reload or watch. `load` returns a snapshot by design and that
-  is documented, so treat it as a feature request, not a bug.
-- Everything is blocking and there are no timeouts, which rules nitera out
-  of an async runtime without a blocking pool. Adding async is a large
-  surface and is not recommended at this stage.
-
-## P4, documentation and benchmark integrity
-
-- `examples/playground.nitersa` still contains `allow host api.github.com`
-  directly above `deny host *`, so its own `allow` line is dead. The same
-  trap was removed from the README during the 1.0.0 release but not from the
-  example. Verified by running it.
-- `README.md` presents 375 ns as the check cost generally. Once symlink
-  resolution is in the path that number describes only `check()` on an
-  already-normalized path, and the README should say so.
-- `BENCHMARKS.md` is admirably honest about its own limits, including the
-  single-workload-shape caveat. Add a row for the authorize-plus-resolve
-  path when that harness exists.
-- The `Nitera::load(".nitera")` failure in item 12 means the README quick
-  start has never worked. Worth a note in the changelog when fixed.
-
-## Suggested sequencing
-
-Small, independent, individually reviewable and revertable PRs. Nothing
-here needs to land as one change.
-
-| PR | Contents | Risk | Latency |
-|---|---|---|---|
-| 1 | Item 12 (`.nitera` filename) | trivial | none |
-| 2 | Item 6 (parser whitespace) | trivial | none |
-| 3 | Items 4 and 5 (quoting) | low | none |
-| 4 | Item 2 (case folding) | low | none |
-| 5 | Item 13 (`HOME` only when needed) | low | small win |
-| 6 | Item 16 (`Debug`) plus item 14 (error accessor) | trivial | none |
-| 7 | Item 1 (symlink resolution) with a new bench harness | moderate | about +1 to 2 us per fs op |
-| 8 | Items 11, 8, 7 (create_dir_all, port, argv) | low to moderate | none |
-| 9 | Item 15 (`non_exhaustive`), labelled as breaking | none | none |
-| 10 | Item 3 (Windows), needs a Windows CI runner | moderate | none |
-| 11 | Items 9 and 10 (env, missing operations) | moderate to high | none |
-
-Items 1 through 6 are all low risk and none of them move latency
-meaningfully. Only item 7 does, and that is unavoidable for any real
-symlink enforcement.
-
-## Non-goals
-
-Explicitly out of scope, so they are not mistaken for oversights:
-
-- Descriptor-relative syscalls and true TOCTOU elimination. That is
-  `cap-std`, with 21.7 million downloads, and duplicating it here would be
-  a large permanent complexity burden for a crate this size.
-- Full Unicode case folding and normalization. Needs locale data.
-- Any global enforcement of `std::fs`. Not possible from a library.
-- Async. Premature for the current API shape.
-
-## Threat model, stated honestly
-
-Nitera is an authorization and audit layer for code that opts in to it.
-It is not a sandbox, and it is not a boundary against a hostile caller.
-
-Items 1 and 2 are why that distinction matters concretely rather than
-academically. On a default macOS setup, or any case-insensitive
-filesystem, a narrow `allow` plus a broad `deny` policy can be bypassed
-and the protected file will be returned. Item 2 needs nothing created on
-disk, only a policy author writing `.SSH` where the caller writes
-`.ssh`, which is an ordinary mistake rather than an attack.
-
-So the accurate description of the crate today is: cooperative,
-same-process code, with a human in the loop for ambiguous operations,
-and a policy narrow enough that the remaining gaps do not matter for the
-code you control. The existing "Current limits" section in `README.md`
-gestures at this but understates it, since it describes the symlink
-issue as a boundary "not currently handled" rather than a case where an
-explicit `deny` does not fire.
-
-Two things this document deliberately does not claim:
-
-- That the fixes will make nitera safe against untrusted input. Symlink
-  resolution narrows the traversal window; it does not close it.
-  Descriptor-relative syscalls are the actual answer, and that is
-  `cap-std`'s job.
-- That any of this is novel. Symlink traversal past lexical path checks
-  is CWE-59 and case-confusion path handling is CWE-178. Both are
-  long-known classes, found by reading a day's worth of path code. The
-  contribution here is that this particular crate has both, and that
-  1.0.0 shipped with them.
-
-## Reporting
-
-Found something in the policy engine that is not in this document, or
-disagree with a finding? Open an issue. Fix PRs against the items above
-are welcome, and the ones marked as touching latency should say what
-they measured.
+Report additional findings with the exact revision, policy, platform and
+filesystem, expected decision, actual decision/operation result, and a
+minimal synthetic reproduction. Findings and proposals remain open to
+correction. Link fixed items to committed regression tests and identify
+unsupported threat models explicitly.
