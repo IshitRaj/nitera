@@ -89,8 +89,8 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
         return true;
     }
 
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        return host.ends_with(&format!(".{suffix}"));
+    if pattern.starts_with("*.") {
+        return host.ends_with(&pattern[1..]);
     }
 
     pattern == host

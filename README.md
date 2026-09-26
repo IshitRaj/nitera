@@ -92,6 +92,14 @@ nitera.create_dir("playground/logs")?;
 
 Paths can be relative, absolute, or `~`-prefixed, and support `*` (single segment) and `**` (any depth) globs.
 
+## How checks work
+
+`Nitera::load()` prepares path patterns once. Checks use a scan for small or broad rule sets and a sorted prefix index for larger, selective sets. The index only selects candidates; the matcher still checks each candidate, with `deny` taking priority over `ask`, then `allow`.
+
+Filesystem rules and process scopes use this lookup. Command and host rules keep their existing matching behavior. Preparation adds some load-time work and memory, but no external dependencies or changes to the public API.
+
+If `HOME` changes after loading, Nitera uses the original policy evaluator so home-relative rules follow the current value. Filesystem and process path checks fail closed when `HOME` is unset. See [evaluation of loaded policies](DOCUMENTATION.md#evaluation-of-loaded-policies) for the details.
+
 ## The approval flow (`ask` rules)
 
 A rule marked `ask` doesn't resolve to allow or deny on its own, it needs a decision made at runtime by an approval handler.
@@ -140,9 +148,9 @@ cargo run --example playground
 
 ## Benchmarks
 
-`check()` currently does a linear scan through a policy's rules, so latency scales with rule count. In a release build that's about 2 microseconds at 1 rule and roughly 1.2 milliseconds at 1000 rules, well under the cost of the filesystem call it's guarding for any policy size most people will actually write.
+Check cost depends on rule count, pattern shape, and whether the set uses a scan or an index. Broad wildcard patterns can still require scanning many candidates.
 
-Full methodology, the dev vs release comparison, and charts are in [`BENCHMARKS.md`](BENCHMARKS.md).
+The supplied Apple M2 run (16 GB RAM, macOS 27.0, Rust 1.98.1, optimized Cargo bench profile) reports **375 ns median and 500 ns p99 at 1,001 total rules**. Full M2 results, comparison limits, and generated charts are in [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ```bash
 cargo bench --bench policy_check

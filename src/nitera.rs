@@ -1,7 +1,8 @@
 use crate::approval::{ApprovalDecision, ApprovalHandler};
 use crate::engine::{CreateKind, Decision, NiteraRequest, Operation};
 use crate::policy::path::resolve_runtime_path;
-use crate::policy::{ParseError, Policy, parse};
+use crate::policy::prepared::PreparedPolicy;
+use crate::policy::{ParseError, parse};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub enum NiteraOperationError {
 }
 
 pub struct Nitera {
-    policy: Policy,
+    policy: PreparedPolicy,
     root: std::path::PathBuf,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
@@ -67,7 +68,7 @@ impl Nitera {
             .map_err(NiteraError::Io)?;
 
         Ok(Self {
-            policy,
+            policy: PreparedPolicy::new(policy, &root),
             root,
             approval_handler: None,
         })
