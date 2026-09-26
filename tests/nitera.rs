@@ -27,6 +27,11 @@ fn unique_path(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("nitera-{tag}-{}-{n}-{nanos}", std::process::id()))
 }
 
+/// Writes a one-line policy to a temporary file and loads it.
+///
+/// Returns the loaded `Nitera` alongside the policy file's path. The
+/// caller owns that file and must remove it before returning, so bind
+/// the whole tuple rather than discarding the path with `.0`.
 fn nitera_with_create_rule(action: &str, target: &std::path::Path) -> (Nitera, std::path::PathBuf) {
     let policy_path = temp_policy_path();
     fs::write(
@@ -1356,10 +1361,12 @@ fn nitera_is_debug_formattable() {
     assert!(rendered.contains("approval_handler"), "{rendered}");
     assert!(rendered.contains("none"), "{rendered}");
 
-    let with_handler = nitera_with_create_rule("allow", &unique_path("debug2.txt"))
-        .0
-        .with_approval_handler(|_: &NiteraRequest| ApprovalDecision::Approved);
+    let (unhandled, handler_policy_path) =
+        nitera_with_create_rule("allow", &unique_path("debug2.txt"));
+    let with_handler =
+        unhandled.with_approval_handler(|_: &NiteraRequest| ApprovalDecision::Approved);
     assert!(format!("{with_handler:?}").contains("registered"));
 
     fs::remove_file(policy_path).unwrap();
+    fs::remove_file(handler_policy_path).unwrap();
 }
