@@ -6,23 +6,24 @@ Full reference for the Nitera crate, based on the current codebase. For a quick 
 
 ```
 src/
-  lib.rs                // re-exports the primary API
-  approval.rs            // ApprovalDecision, ApprovalHandler, and NiteraRequest's Display impl
-  nitera.rs                // Nitera, NiteraError, NiteraOperationError
+  lib.rs                  // re-exports the primary API
+  approval.rs             // ApprovalDecision, ApprovalHandler
+  nitera.rs               // Nitera, NiteraError, NiteraOperationError
   engine/
-    mod.rs                 // re-exports
-    decision.rs             // Decision
-    request.rs               // NiteraRequest, Resource, Operation, Target
+    mod.rs                // re-exports
+    decision.rs           // Decision
+    request.rs            // request types and NiteraRequest's Display impl
   policy/
-    mod.rs                    // re-exports model::* and parser::*
-    model.rs                    // Policy and its sub-structs, PathPattern, HostPattern
-    parser.rs                    // parse(), ParseError
-    evaluate.rs                    // Policy::evaluate, the decision algorithm
-    matcher.rs                      // PathPattern/HostPattern matching, host_matches()
-    path.rs                          // path resolution and normalization helpers
+    mod.rs                // public model/parser re-exports; internal prepared module
+    model.rs              // Policy and its sub-structs, PathPattern, HostPattern
+    parser.rs             // parse(), ParseError
+    evaluate.rs           // public Policy::evaluate, using rule scans
+    matcher.rs            // PathPattern/HostPattern matching, host_matches()
+    path.rs               // path resolution and normalization helpers
+    prepared.rs           // internal prepared matcher and prefix lookup
 ```
 
-Every module here is declared `pub mod`, so nothing is private at the module level, only individual items without `pub` are hidden. In practice this gives two tiers of API: a small, intentional surface re-exported at the crate root, and a much larger surface reachable by spelling out the full module path.
+Most modules are public. `policy::prepared` is declared `pub(crate)` and is an implementation detail, not part of the public API. Consumers have two public entry points: the primary types re-exported at the crate root, and additional types and helpers reachable through their module paths.
 
 ## Public API surface
 
@@ -36,13 +37,13 @@ pub use engine::{CreateKind, Decision, NiteraRequest, Operation, Resource, Targe
 pub use nitera::{Nitera, NiteraError, NiteraOperationError};
 ```
 
-This is the intended entry point: `nitera::Nitera`, `nitera::NiteraError`, `nitera::NiteraOperationError`, `nitera::Decision`, `nitera::NiteraRequest`, `nitera::Operation`, `nitera::Resource`, `nitera::Target`, `nitera::ApprovalDecision`, `nitera::ApprovalHandler`. Everything a typical consumer needs is in this list, and everything below in "`Nitera`", "The approval flow", and "Errors" refers to it.
+This is the intended entry point: `nitera::Nitera`, `nitera::NiteraError`, `nitera::NiteraOperationError`, `nitera::Decision`, `nitera::NiteraRequest`, `nitera::Operation`, `nitera::Resource`, `nitera::Target`, `nitera::CreateKind`, `nitera::ApprovalDecision`, `nitera::ApprovalHandler`. Everything a typical consumer needs is in this list, and everything below in "`Nitera`", "The approval flow", and "Errors" refers to it.
 
 One naming note: the module holding `Nitera` is itself named `nitera.rs`, inside a crate also named `nitera`. Without the re-export above, the real path to the type would be `nitera::nitera::Nitera`. That `pub use` isn't just convenience, it's what makes `nitera::Nitera` work at all.
 
 ### Reachable, but not re-exported
 
-Because every module is `pub mod`, the parser, matcher, and path-resolution internals are technically public too, just reached by full path instead of the crate root:
+The public policy model, parser, pattern matcher, and path-resolution helpers can also be reached by their full paths:
 
 ```rust
 nitera::policy::{Policy, FilesystemPolicy, FilesystemRules, ProcessPolicy, NetworkPolicy, PathPattern, HostPattern}
@@ -103,17 +104,20 @@ Any unrecognized action or kind word, or a rule missing its values, produces a `
 ### Matching semantics
 
 - `*` matches exactly one path segment, any content.
-- `**` matches zero or more segments. The matcher first tries consuming zero, then backtracks to consume one segment at a time and retries, so `projects/**` matches `projects` itself as well as anything nested under it, at any depth.
-- Both sides of a comparison, the pattern and the path being checked, are resolved to absolute, normalized form first (see below), then split on `/` and compared segment by segment.
+- `**` matches zero or more segments, so `projects/**` matches `projects` itself as well as anything nested under it, at any depth.
+- Wildcards must occupy a whole segment. A segment such as `*.txt` is a literal name, not a filename-extension glob.
+- Matching uses normalized paths and patterns, resolved against the supplied base. Loaded policies prepare their patterns once and normally resolve each request path once; the prepared matcher preserves the same segment semantics using literal, prefix, and glob comparisons.
 - Host patterns: `*` matches any host; a `*.suffix` prefix matches only subdomains of `suffix` (`api.example.com` matches `*.example.com`, but bare `example.com` does not); anything else must match exactly.
 
 ### Resolution mechanics
 
 - `expand_home(path)`: a bare `~` becomes `$HOME`; a `~/...` prefix becomes `$HOME/...`; anything else passes through unchanged. Requires the `HOME` environment variable to be set, returns an `io::Error` if it isn't.
 - `normalize_path(path)`: purely lexical, resolves `.` (dropped) and `..` (pops the previous segment), no filesystem access, so it works for paths that don't exist yet. A leading `..` past the root doesn't error, it's dropped once there's nothing left to pop.
-- `resolve_runtime_path(path, base)`: expands `~`, joins onto `base` if the result isn't already absolute, then lexically normalizes. This is what every `Nitera` operation calls internally, with `base` set to the `Nitera`'s root.
-- `normalize_runtime_path(path)`: the same, but resolves against `std::env::current_dir()` instead of an explicit base. Not called anywhere inside `Nitera` itself, a standalone convenience for code that wants "resolve the way the OS would from here."
-- `normalize_pattern(pattern, base)`: the pattern-string equivalent, used internally before a pattern is compared against a path.
+- `resolve_runtime_path(path, base)`: expands `~`, resolves a relative result against `base`, then lexically normalizes. Filesystem operations and `execute` use it for their path or working directory, with `base` set to the `Nitera`'s root. Like `expand_home`, it requires `HOME` to be set, including for paths without `~`.
+- `normalize_runtime_path(path)`: the same, but resolves against `std::env::current_dir()` instead of an explicit base. It is a standalone convenience helper, not used inside `Nitera` itself.
+- `normalize_pattern(pattern, base)`: the pattern-string equivalent. Loaded policies use it during preparation; public `PathPattern` matching normalizes patterns on demand.
+
+On Unix, prepared checks can borrow an already-normalized absolute request path and normalize relative paths without building an intermediate joined buffer. Other platforms retain their existing path-joining behavior. These are allocation optimizations: path normalization remains lexical and `HOME` validation still applies. Non-UTF-8 paths use the same `to_string_lossy()` conversion as the public matcher.
 
 ### A note on traversal
 
@@ -133,6 +137,8 @@ Reads and parses a `.nitera` policy file at `path`. The path must have a `.niter
 
 Because the parent directory is canonicalized, it must actually exist on disk.
 
+Loading also prepares filesystem patterns and process scopes against that root. Nitera retains the parsed policy and the `HOME` value used during preparation. The loaded instance is a snapshot of the policy file; call `Nitera::load()` again to pick up file edits.
+
 Returns `NiteraError::InvalidPolicyFile` when the path does not have a `.nitera` extension, `NiteraError::Io` if the file cannot be read or its parent cannot be canonicalized, and `NiteraError::Parse` if the policy contents cannot be parsed.
 
 ### `Nitera::with_approval_handler`
@@ -149,7 +155,26 @@ Builder-style, consumes and returns `Self`. Registers a handler consulted whenev
 pub fn check(&self, request: &NiteraRequest) -> Decision
 ```
 
-Runs policy evaluation only, no I/O, no approval handler consulted. Build a request with `NiteraRequest::filesystem(...)`, `::process(...)`, or `::network(...)` and inspect what the policy would say before deciding whether to call the real operation.
+Evaluates a request without performing the guarded operation or consulting an approval handler. Build a request with `NiteraRequest::filesystem(...)`, `::create(...)`, `::process(...)`, or `::network(...)` and inspect what the policy would say before deciding whether to call the real operation.
+
+### Evaluation of loaded policies
+
+`Nitera::check()` uses the internal prepared policy. Filesystem checks select the rule lists for the requested operation and test `deny`, then `ask`, then `allow`. No match, or a resource/operation/target combination that is not supported, returns `Deny`.
+
+Each path rule list chooses between a scan and a sorted prefix index:
+
+- Small lists and sets with few distinct literal prefixes use the scan.
+- Sets with at least 64 rules, at least eight distinct literal prefixes, and at most 16 distinct prefix lengths use the index. These are internal selection thresholds, not policy-file settings.
+- The first rule retains its early-match check. Remaining rules are sorted by literal prefix, with their order preserved within each prefix group.
+- Lookup finds candidate groups at path-component boundaries. The existing matcher checks each candidate, including rules with an empty literal prefix such as `/**/private`; the index does not decide permission on its own.
+
+Process scopes use the same path lookup. A matching scope is required before the command's deny/ask/allow lists are evaluated. Commands still use exact string matching, and network rules still scan host patterns. The index does not cache request decisions or change precedence.
+
+While `HOME` matches its value at load time, path checks use the prepared rules. If it changes, checks use the retained source policy and resolve home-relative rules against the current value. If `HOME` is unset, filesystem and process path checks fail closed. This preserves home-relative deny rules even when a broad allow rule could also match.
+
+Preparation and sorting add load-time work and temporary memory. Lookup can avoid visiting unrelated rules in a selective set, but broad glob groups may still require many matches. See [`BENCHMARKS.md`](BENCHMARKS.md) for measurements and their limits.
+
+The public `Policy::evaluate()` API continues to scan the policy's current fields directly. It does not retain a prepared index, so callers can still construct or edit a `Policy` in memory and evaluate it immediately.
 
 ### `Nitera::read`, `write`, `delete`
 
@@ -344,15 +369,16 @@ HostPattern("*.example.com".into()).matches("api.example.com");
 host_matches("*.example.com", "api.example.com"); // same thing, as a free function
 ```
 
-`PathPattern::matches` resolves relative to `std::env::current_dir()`; `PathPattern::matches_from` takes an explicit base, the version `Nitera` itself uses internally.
+`PathPattern::matches` resolves relative to `std::env::current_dir()`; `PathPattern::matches_from` takes an explicit base. `Policy::evaluate()` uses explicit-base pattern matching. Loaded `Nitera` instances normally use prepared rules as described in [evaluation of loaded policies](#evaluation-of-loaded-policies).
 
 ## Testing
 
-Three integration test files, run with `cargo test`:
+Run unit and integration tests with `cargo test`. Unit tests in `matcher.rs`, `path.rs`, and `prepared.rs` cover pattern semantics, normalization, and prepared/indexed lookup. There are four integration test files:
 
-- `tests/nitera.rs`, exercises the `Nitera` struct's public methods end to end (load, check, read, write, delete, execute, connect, and the approval flow through each).
+- `tests/nitera.rs`, exercises the public API end to end: loading, checking, filesystem operations, execution, connections, and approval handling.
 - `tests/policy_evaluation.rs`, exercises `Policy::evaluate` directly against hand-built policies, without going through the parser or `Nitera`.
 - `tests/policy_parser.rs`, exercises `parse()` directly, valid and invalid `.nitera` syntax.
+- `tests/prepared_policy.rs`, compares loaded policies with the public evaluator and checks host suffixes, non-UTF-8 paths, and missing or changed `HOME`. Environment-changing cases run in an isolated child process so they do not interfere with other tests.
 
 ## Known limitations
 
