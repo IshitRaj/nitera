@@ -39,7 +39,7 @@ or add it directly to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nitera = "0.1.1"
+nitera = "1.0.0"
 ```
 
 ## Quick start
@@ -74,7 +74,6 @@ allow scope ./playground/**
 [network]
 allow host api.github.com
 ask host *.internal.example.com
-deny host *
 ```
 
 Every rule falls into `allow`, `ask`, or `deny`. If a request doesn't match any rule at all, it's denied by default, nothing is implicitly allowed. If more than one rule could match, Nitera checks in this order: `deny` first, then `ask`, then `allow`. The most restrictive match always wins.
@@ -89,6 +88,8 @@ nitera.create_dir("playground/logs")?;
 **Process** rules gate on the command name (`allow command cargo, rustc`) and separately require a `scope`, a path glob the working directory must fall inside. Scope is checked first: a command run outside every listed scope is denied even if that exact command is on the allow list.
 
 **Network** rules match on host.
+
+Note there is no `deny host *` catch-all above, and none is needed: unmatched hosts are already denied. If you do add one, it overrides every other host rule, because `deny` is checked first, so `allow host api.github.com` next to `deny host *` would leave `api.github.com` denied.
 
 Paths can be relative, absolute, or `~`-prefixed, and support `*` (single segment) and `**` (any depth) globs.
 
@@ -105,16 +106,18 @@ If `HOME` changes after loading, Nitera uses the original policy evaluator so ho
 A rule marked `ask` doesn't resolve to allow or deny on its own, it needs a decision made at runtime by an approval handler.
 
 ```rust
-use nitera::{ApprovalDecision, Nitera};
+use nitera::{ApprovalDecision, Nitera, NiteraRequest};
 
 let nitera = Nitera::load(".nitera")
     .expect("failed to load policy")
-    .with_approval_handler(|request| {
+    .with_approval_handler(|request: &NiteraRequest| {
         // show the request to a human, a log, a prompt, whatever fits
         println!("Approve: {request}?");
         ApprovalDecision::Approved // or ApprovalDecision::Denied
     });
 ```
+
+Annotate the parameter as `&NiteraRequest`. Without an explicit type, the closure's inferred signature isn't generic over the request's lifetime and you'll hit `implementation of 'Fn' is not general enough`. Passing a named `fn` item instead of a closure works without the annotation.
 
 `ApprovalHandler` is a plain trait, so a closure or a struct with its own state both work. The handler is only ever consulted for a rule explicitly marked `ask`, it's never given the chance to override a `deny`, and whatever it approves is exactly the operation that was evaluated, nothing about the request can be substituted on the way through.
 

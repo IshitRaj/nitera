@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-26
+
 ### Changed
 
 - Refresh benchmark documentation with the reported Apple M2 results and Python-generated charts.
