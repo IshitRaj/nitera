@@ -1,18 +1,22 @@
 # Security and hardening audit, 1.0.0
 
-**Status: open, nothing fixed yet.** Published in draft alongside the
-v1.0.0 release commit (`e099faf`) as a tracking document. The crate as
-published on crates.io has every finding below.
+**Status: 3 of 19 fixed on `main`, none released yet.** The two
+confirmed bypasses, items 1 and 2, are still open. `nitera 1.0.0` on
+crates.io has every finding below, including the three marked fixed,
+which are on `main` and unreleased.
 
-Two of them, items 1 and 2, are confirmed policy bypasses. A caller
-behind a narrow `allow` plus a broad `deny` can be made to read a
-protected file, and on a case-insensitive filesystem the second one
-requires nothing created on disk at all. Both return the payload.
-Reproduction is in the sections below.
+The Status column tracks fixes in place, and each fix PR flips its own
+row in the same commit that lands it. Anything marked "fixed,
+unreleased" is on `main` but not in a published version.
 
-Fixes are landing as separate, independently reviewable PRs. The Status
-column below tracks them, and the sequencing table at the end gives the
-intended order. The findings themselves are not up for debate.
+Both of those reproduce, and return the payload. A caller behind a
+narrow `allow` plus a broad `deny` can be made to read a protected
+file, and the second needs nothing created on disk at all. Details are
+in the sections below.
+
+Fixes are landing as separate, independently reviewable PRs. The
+sequencing table at the end gives the intended order. The findings
+themselves are not up for debate.
 
 Every claim here was checked by reading the code and, where marked
 "verified", by running a throwaway program against the v1.0.0 checkout.
@@ -34,17 +38,17 @@ sequencing table at the end refers to.
 | 3 | Windows path handling is broken | correctness | code inspection, needs a Windows host | open |
 | 4 | Comma in a path silently splits into two patterns | correctness | verified | open |
 | 5 | `#` in a path silently truncates the rule | correctness | verified | open |
-| 6 | Double space between action and kind breaks parsing | correctness | verified | open |
+| 6 | Double space between action and kind breaks parsing | correctness | verified | fixed, unreleased |
 | 7 | Process arguments are not evaluated | model gap | verified | open |
 | 8 | Network port is not evaluated | model gap | verified | open |
 | 9 | Environment is inherited wholesale and is not policy-able | model gap | verified | open |
 | 10 | `read_dir`, `rename`, `copy`, symlink and metadata are not covered at all | model gap | verified | open |
 | 11 | `create_dir` is single level, with no `create_dir_all` | ergonomics | verified | open |
-| 12 | `Nitera::load(".nitera")` always fails | bug | verified | open |
+| 12 | `Nitera::load(".nitera")` always fails | bug | verified | fixed, unreleased |
 | 13 | `HOME` is required even when no rule uses `~` | robustness | verified | open |
 | 14 | `NiteraOperationError::Denied` carries no request | auditability | verified | open |
 | 15 | Public enums are not `#[non_exhaustive]` | evolution | verified | open |
-| 16 | `Nitera` derives nothing, so no `Debug` | ergonomics | verified | open |
+| 16 | `Nitera` derives nothing, so no `Debug` | ergonomics | verified | fixed, unreleased |
 | 17 | Normalization failure becomes a silent never-match rule | latent | verified masked | open |
 | 18 | macOS `/tmp` versus `/private/tmp` aliasing | footgun | code inspection | open |
 | 19 | `examples/playground.nitersa` has a dead `allow host` line, see docs below | docs | verified | open |
