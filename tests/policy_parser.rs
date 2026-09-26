@@ -486,3 +486,49 @@ fn parses_network_hosts_with_whitespace() {
         ]
     );
 }
+
+#[test]
+fn tolerates_runs_of_whitespace_between_action_and_kind() {
+    // A double space used to produce an empty `kind` field, which then
+    // failed as "unknown filesystem operation: " with a blank name.
+    let policy = parse("[filesystem]\nallow  read ./a\n").unwrap();
+
+    assert_eq!(
+        policy.filesystem.allow.read,
+        vec![PathPattern("./a".into())]
+    );
+}
+
+#[test]
+fn tolerates_mixed_tabs_and_spaces_between_fields() {
+    let policy = parse("[filesystem]\nallow\t \tread ./a\n").unwrap();
+
+    assert_eq!(
+        policy.filesystem.allow.read,
+        vec![PathPattern("./a".into())]
+    );
+}
+
+#[test]
+fn values_field_still_keeps_spaces_around_commas() {
+    // Splitting the whole line on whitespace would drop every value after
+    // the first, so the third field has to stay "rest of line".
+    let policy = parse("[filesystem]\nallow read ./a, ./b ,  ./c\n").unwrap();
+
+    assert_eq!(
+        policy.filesystem.allow.read,
+        vec![
+            PathPattern("./a".into()),
+            PathPattern("./b".into()),
+            PathPattern("./c".into()),
+        ]
+    );
+}
+
+#[test]
+fn still_reports_missing_rule_when_there_is_no_second_field() {
+    let error = parse("[filesystem]\nallow\n").unwrap_err();
+
+    assert_eq!(error.line, 2);
+    assert_eq!(error.message, "missing rule");
+}
