@@ -12,5 +12,7 @@ ask command rm
 allow scope ./**
 
 [network]
+# Unmatched hosts are denied by default, so no catch-all deny is needed
+# here. Adding `deny host *` would override the allow below, because deny
+# is checked first.
 allow host api.github.com
-deny host *
