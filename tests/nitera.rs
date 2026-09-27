@@ -774,6 +774,33 @@ fn connect_unknown_host_is_denied() {
 }
 
 #[test]
+fn example_policy_allows_its_intended_host() {
+    // SECURITY-AUDIT item 19: the example policy shipped with `allow host
+    // api.github.com` directly above `deny host *`. Deny is checked first,
+    // so the allow never applied and the example taught the wrong thing.
+    //
+    // Checks decisions, not parsing, and opens no socket. Cargo runs
+    // integration tests from the crate root, the same relative path
+    // `examples/playground.rs` itself uses.
+    let nitera =
+        Nitera::load("examples/playground.nitera").expect("the shipped example policy should load");
+
+    assert_eq!(
+        nitera.check(&NiteraRequest::network("api.github.com", 443)),
+        Decision::Allow,
+        "the example's only host allow should actually allow"
+    );
+
+    // An unmatched host stays denied by default, so removing the
+    // catch-all deny must not widen the policy.
+    assert_eq!(
+        nitera.check(&NiteraRequest::network("example.com", 443)),
+        Decision::Deny,
+        "removing `deny host *` must not open up unmatched hosts"
+    );
+}
+
+#[test]
 fn read_ask_approved_performs_read() {
     let dir = std::env::temp_dir();
     let policy_path = temp_policy_path();
