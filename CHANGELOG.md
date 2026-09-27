@@ -11,7 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `Nitera::load(".nitera")` now works. The extension check rejected a file named exactly `.nitera`, because `Path::extension` reports no extension for a dotfile, which made the documented quick start fail with `InvalidPolicyFile`. A path is now accepted if its extension is `nitera` or its file name is exactly `.nitera`.
 - The `.nitera` parser no longer fails on a run of whitespace between a rule's action and its kind. `allow  read ./a` produced an empty kind and an `unknown filesystem operation: ` error with no name in it. A values list keeps its spacing around commas, since that field is still the rest of the line.
-- `examples/playground.nitra` listed `allow host api.github.com` directly above `deny host *`. Since `deny` is checked first, the allow never applied, so the shipped example demonstrated a rule that did nothing. The catch-all is removed, and unmatched hosts stay denied by default.
 
 ### Added
 

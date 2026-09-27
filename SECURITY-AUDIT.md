@@ -1,9 +1,10 @@
 # Security and hardening audit, 1.0.0
 
-**Status: items 6, 12, 16, and 19 are fixed on `main`, but unreleased as of
-the reviewed base `0a9367f` (2026-09-26).** Items 1, 2, and 18 remain
-confirmed policy bypasses. Item 18 is another instance of unresolved
-filesystem aliases, not an independent vulnerability class.
+**Status: items 6, 12, and 16 are fixed on `main` and will ship in the next
+release. Item 19 is fixed in the repository only, because `examples/` is
+not part of the published package. Items 1, 2, and 18 remain confirmed
+policy bypasses. Item 18 is another instance of unresolved filesystem
+aliases, not an independent vulnerability class.
 
 This document records findings and a corrected remediation plan. Updating
 the document does not fix the implementation. The original audit targeted
@@ -81,7 +82,7 @@ Numbering matches the detailed findings and sequencing table.
 | 16 | Nitera lacks Debug in 1.0.0 | ergonomics | implementation and regression test reviewed | fixed, unreleased (#3) |
 | 17 | Normalization errors become nonmatching patterns | latent hardening concern | missing-HOME scenario fails closed | open; no demonstrated bypass |
 | 18 | /tmp versus /private/tmp alias can bypass a deny | security, related to #1 | protected synthetic payload returned | open |
-| 19 | Example host allow is overridden by deny host * | documentation | resulting Deny verified | fixed, unreleased |
+| 19 | Example host allow is overridden by deny host * | documentation | resulting Deny verified | fixed, repository only |
 
 ## Security and platform correctness
 
@@ -502,7 +503,7 @@ remove the ineffective allow and explain the all-denied example. Keep the
 example and its narrative consistent. Verify GitHub and an unmatched host
 with local policy checks; no external connection is needed.
 
-**Status: fixed, unreleased.** The example is intended to allow GitHub, so
+**Status: fixed, repository only.** The example is intended to allow GitHub, so
 the catch-all `deny host *` was removed and replaced with a comment
 recording why no catch-all is needed and what it would have done. Coverage
 is `example_policy_allows_its_intended_host` in `tests/nitersa.rs`, which
@@ -511,6 +512,10 @@ evaluates to Allow, and an unmatched host still evaluates to Deny, so
 removing the deny cannot be mistaken for widening the policy. It checks
 decisions through `Nitera::check` and opens no socket. Verified failing
 against the old policy (`left: Deny, right: Allow`) and passing after.
+
+`examples/` is excluded by the `include` list in `Cargo.toml`, so this fix
+is not carried by any published version and has no `CHANGELOG.md` entry.
+It affects anyone reading or running the repository only.
 
 Two other `deny host *` occurrences were inspected and deliberately left
 alone. `connect_deny_overrides_allow` in `tests/nitersa.rs` uses the dead
@@ -537,7 +542,7 @@ across changes that temporarily allow requests the policy should deny.
 | Order | Items | Deliverable and acceptance gate |
 |---|---|---|
 | Already merged | 6, 12, 16 | Preserve fixes from #3 and test cleanup from #5; track release status. |
-| Landed early | 19 | Example policy corrected independently of the path work; track release status. |
+| Landed early | 19 | Example policy corrected independently of the path work; repository only, no release carries it. |
 | 1 | 1, 2, 3, 18 | Commit isolated bypass regressions and a platform/path semantics contract; distinguish static-alias mitigation from race resistance. |
 | 2 | 1, 18 | Implement shared, operation-aware resolved authorization; pass symlink, alias, creation, deletion, and cwd checks; benchmark guarded operations. |
 | 3 | 2, 3 | Enforce supported filesystem name equivalence through both matchers and candidate indexes; reject unsupported enforcement modes; run platform tests. |
