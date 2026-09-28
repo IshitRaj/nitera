@@ -37,12 +37,21 @@ jobs:
     # prefix is detected from the text rather than from `Path::is_absolute`,
     # which reports false for a `/`-rooted path on Windows. See
     # SECURITY-AUDIT.md item 3.
+    #
+    # Windows does not set `HOME`, and the library requires it for every path
+    # (SECURITY-AUDIT item 13, still open). The job supplies it so the suite has
+    # the same environment Unix has. This is test infrastructure only; no
+    # library behavior changes. The alternative, letting each test set the
+    # variable itself, races across the parallel test threads.
+    env:
+      HOME: C:\Users\runneradmin
+
     steps:
       - uses: actions/checkout@v7
       - name: Build
         run: cargo build --verbose
       - name: Run tests
-        run: cargo test --verbose -- --nocapture
+        run: cargo test --verbose
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy

@@ -124,90 +124,6 @@ mod tests {
         root().join(relative)
     }
 
-    /// TEMPORARY DIAGNOSTIC, removed once the port is fixed. Prints every
-    /// intermediate value so a platform mismatch can be read off the CI log
-    /// instead of inferred.
-    #[test]
-    fn diagnostic_platform_values() {
-        use crate::policy::path::{resolve_runtime_path, to_policy_string};
-
-        let cwd = std::env::current_dir().unwrap();
-        let base = at("project");
-        let home = ensure_home();
-
-        let cases: Vec<(&str, String, PathBuf, PathBuf)> = vec![
-            (
-                "exact",
-                policy("project/file.txt"),
-                at("project/file.txt"),
-                cwd.clone(),
-            ),
-            (
-                "star",
-                policy("projects/*"),
-                at("projects/app"),
-                cwd.clone(),
-            ),
-            (
-                "rel-dot",
-                "./playground/**".into(),
-                PathBuf::from("./playground/test.txt"),
-                base.clone(),
-            ),
-            (
-                "rel-plain",
-                "playground/**".into(),
-                PathBuf::from("playground/test.txt"),
-                base.clone(),
-            ),
-            (
-                "abs",
-                format!("{}/**", to_policy_string(&at("playground"))),
-                at("playground/test.txt"),
-                base.clone(),
-            ),
-            (
-                "home",
-                "~/projects/**".into(),
-                PathBuf::from(&home).join("projects/myapp/src/main.rs"),
-                at("other-base"),
-            ),
-        ];
-
-        for (name, pat, req, b) in &cases {
-            let norm = normalize_pattern(pat, b);
-            let res = resolve_runtime_path(req, b);
-            println!("DIAG {name}");
-            println!("   base     = {b:?}");
-            println!("   base_str = {}", to_policy_string(b));
-            println!("   pattern  = {pat:?}");
-            println!("   normpat  = {norm:?}");
-            println!("   request  = {req:?}");
-            println!("   req_str  = {}", to_policy_string(req));
-            match &res {
-                Ok(r) => {
-                    println!("   resolved = {}", to_policy_string(r));
-                    println!(
-                        "   result   = {}",
-                        PathPattern(pat.clone()).matches_from(req, b)
-                    );
-                    if let Ok(n) = &norm {
-                        println!("   rawmatch = {}", match_path(n, r));
-                    }
-                }
-                Err(e) => println!("   resolve_err = {e:?}"),
-            }
-        }
-
-        println!(
-            "DIAG env cwd={cwd:?} temp={:?} HOME={:?} sep={:?} abs={:?}",
-            std::env::temp_dir(),
-            std::env::var_os("HOME"),
-            std::path::MAIN_SEPARATOR,
-            at("x").is_absolute()
-        );
-    }
-
     #[test]
     fn exact_path_matches() {
         let path = at("project/file.txt");
@@ -274,29 +190,10 @@ mod tests {
         assert!(!pattern.matches_from(&at("project/playground/test.txt"), &base));
     }
 
-    /// Returns `HOME`, setting a temporary one if the platform does not
-    /// provide it.
-    ///
-    /// Windows does not set `HOME`. The library only needs it for a
-    /// home-relative path, but a test that reads the variable directly would
-    /// panic there. Not restored, because every test here wants it and a
-    /// process-wide value that matches the platform is not observable.
-    fn ensure_home() -> std::ffi::OsString {
-        if let Some(existing) = std::env::var_os("HOME") {
-            return existing;
-        }
-
-        let value = root().join("home-fixture").into_os_string();
-        // SAFETY: single-threaded within this test.
-        unsafe { std::env::set_var("HOME", &value) };
-
-        value
-    }
-
     #[test]
     fn home_pattern_matches_runtime_path() {
         let pattern = PathPattern("~/projects/**".into());
-        let home = ensure_home();
+        let home = std::env::var("HOME").unwrap();
 
         let path = Path::new(&home)
             .join("projects")
@@ -310,7 +207,7 @@ mod tests {
     #[test]
     fn traversal_is_normalized_before_matching() {
         let pattern = PathPattern("~/projects/**".into());
-        let home = ensure_home();
+        let home = std::env::var("HOME").unwrap();
 
         let path = Path::new(&home)
             .join("projects")

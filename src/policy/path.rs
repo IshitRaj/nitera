@@ -118,6 +118,11 @@ pub fn resolve_runtime_path(
     path: impl AsRef<Path>,
     base: impl AsRef<Path>,
 ) -> std::io::Result<PathBuf> {
+    // `HOME` is required for every path, not only a home-relative one. That is
+    // SECURITY-AUDIT item 13 and it is still open: the prepared evaluator fails
+    // closed when `HOME` is absent, so making only this function tolerate a
+    // missing `HOME` would leave the two evaluators disagreeing. Fixed in one
+    // piece later, not half here.
     let home = std::env::var_os("HOME").ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -401,30 +406,30 @@ pub fn normalize_pattern(pattern: &str, base: impl AsRef<Path>) -> std::io::Resu
     // `Path`. Deciding whether a pattern is absolute with `Path::is_absolute`
     // is wrong on Windows, where a `/`-rooted path has a root but no drive and
     // so is not absolute; that made an absolute pattern get joined onto the
-    // base. A pattern is absolute if its text starts with a separator, a drive
+    // base. A pattern is anchored if its text starts with a separator, a drive
     // letter, or a UNC `//`.
     let expanded = expand_home(pattern)?;
     let expanded = to_policy_string(&expanded);
 
-    let (anchor, body) = if let Some(rest) = expanded.strip_prefix("\\\\") {
-        // UNC: `//server/share/...`
-        (Some("//"), rest)
-    } else if expanded.len() >= 2
-        && expanded.as_bytes()[1] == b':'
-        && expanded.as_bytes()[0].is_ascii_alphabetic()
-    {
-        // Drive: `C:/...`
-        (Some(&expanded[..2]), &expanded[2..])
-    } else if let Some(rest) = expanded.strip_prefix('/') {
-        (Some("/"), rest)
+    // The base is joined on only when the pattern carries no anchor of its own.
+    // The anchor is then detected from the *joined* text, because the base can
+    // supply a drive or UNC prefix the pattern did not have. Detecting it from
+    // the pattern alone turned a drive-qualified base into `/C:/base/...`, a
+    // path with a leading separator in front of the drive, which matches
+    // nothing.
+    let joined = if split_anchor(&expanded).is_some() {
+        expanded
     } else {
-        (None, expanded.as_str())
+        format!(
+            "{}/{}",
+            to_policy_string(base.as_ref()).trim_end_matches('/'),
+            expanded
+        )
     };
 
-    let base_text = to_policy_string(base.as_ref());
-    let body = match anchor {
-        Some(_) => body.to_string(),
-        None => format!("{}/{}", base_text.trim_end_matches('/'), body),
+    let (anchor, body) = match split_anchor(&joined) {
+        Some((anchor, body)) => (Some(anchor), body),
+        None => (None, joined.as_str()),
     };
 
     let mut result = Vec::new();
@@ -451,17 +456,36 @@ pub fn normalize_pattern(pattern: &str, base: impl AsRef<Path>) -> std::io::Resu
         }
     }
 
-    let joined = result.join("/");
+    let body = result.join("/");
 
     // The anchor is reattached in its original form so a drive or UNC prefix
     // survives normalization, while a bare POSIX root keeps its leading `/`.
     Ok(match anchor {
-        Some("//") => format!("//{joined}"),
+        Some("//") => format!("//{body}"),
         // A POSIX root needs no re-separator, a drive does.
-        Some("/") => format!("/{joined}"),
-        Some(drive) => format!("{drive}/{joined}"),
-        None => format!("/{joined}"),
+        Some("/") => format!("/{body}"),
+        Some(drive) => format!("{drive}/{body}"),
+        // Nothing was anchored, so this stays a bare relative policy path and
+        // keeps the leading `/` it has always had.
+        None => format!("/{body}"),
     })
+}
+
+/// Splits a root or drive prefix off the front of a `/`-form path.
+///
+/// Returns `None` when the path carries no anchor, and otherwise the anchor
+/// text plus the remainder. A UNC `//` is tested first, since it too starts
+/// with a separator.
+fn split_anchor(text: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = text.strip_prefix("//") {
+        return Some(("//", rest));
+    }
+
+    if text.len() >= 2 && text.as_bytes()[1] == b':' && text.as_bytes()[0].is_ascii_alphabetic() {
+        return Some((&text[..2], &text[2..]));
+    }
+
+    text.strip_prefix('/').map(|rest| ("/", rest))
 }
 
 #[cfg(test)]
@@ -525,51 +549,12 @@ mod tests {
         assert_eq!(result, PathBuf::from("/etc/passwd"));
     }
 
-    /// Sets `HOME` for the duration of a test on a platform that does not
-    /// provide one, and restores the previous value on drop.
-    ///
-    /// Windows does not set `HOME`, so a test that reads it directly would
-    /// panic there even though the library itself only needs it for a
-    /// home-relative path. Restoring on drop keeps one test from leaking the
-    /// value into another in the same process.
-    struct HomeGuard(Option<std::ffi::OsString>);
-
-    impl HomeGuard {
-        /// Returns the effective `HOME`, having set a temporary one if the
-        /// platform does not provide it.
-        fn ensure() -> (std::ffi::OsString, Self) {
-            let existing = std::env::var_os("HOME");
-            let value = existing.clone().unwrap_or_else(|| {
-                std::env::temp_dir()
-                    .join("nitera-home-fixture")
-                    .into_os_string()
-            });
-            // SAFETY: single-threaded within this test, and restored on drop.
-            unsafe { std::env::set_var("HOME", &value) };
-
-            (value, Self(existing))
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: as above.
-            unsafe {
-                match &self.0 {
-                    Some(previous) => std::env::set_var("HOME", previous),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
-    }
-
     #[test]
     fn expands_home() {
-        let (home, _guard) = HomeGuard::ensure();
-
         let result = expand_home("~/projects/file.txt").unwrap();
+        let home = std::env::var("HOME").unwrap();
 
-        assert_eq!(result, PathBuf::from(&home).join("projects/file.txt"));
+        assert_eq!(result, PathBuf::from(home).join("projects/file.txt"));
     }
 
     #[test]
