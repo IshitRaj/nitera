@@ -276,19 +276,26 @@ fn reports_parse_error_line_and_message() {
 #[test]
 fn check_allows_allowed_request() {
     let path = temp_policy_path();
+    // A literal `/tmp` is absolute on Unix but only drive-relative on Windows,
+    // where it would be joined onto the policy's base directory and match
+    // nothing. The rule and the request both name a real absolute path here.
+    let root = std::env::temp_dir();
 
     fs::write(
         &path,
-        r#"
+        format!(
+            r#"
         [filesystem]
-        allow read /tmp/**
+        allow read {}/**
         "#,
+            root.display()
+        ),
     )
     .unwrap();
 
     let nitera = Nitera::load(&path).unwrap();
 
-    let request = NiteraRequest::filesystem(Operation::Read, "/tmp/test.txt");
+    let request = NiteraRequest::filesystem(Operation::Read, root.join("test.txt"));
 
     assert_eq!(nitera.check(&request), Decision::Allow);
 
@@ -320,19 +327,24 @@ fn check_denies_unmatched_request() {
 #[test]
 fn check_returns_ask() {
     let path = temp_policy_path();
+    // A real absolute path, for the same reason as `check_allows_allowed_request`.
+    let root = std::env::temp_dir();
 
     fs::write(
         &path,
-        r#"
+        format!(
+            r#"
         [filesystem]
-        ask read /tmp/important/**
+        ask read {}/important/**
         "#,
+            root.display()
+        ),
     )
     .unwrap();
 
     let nitera = Nitera::load(&path).unwrap();
 
-    let request = NiteraRequest::filesystem(Operation::Read, "/tmp/important/data.txt");
+    let request = NiteraRequest::filesystem(Operation::Read, root.join("important/data.txt"));
 
     assert_eq!(nitera.check(&request), Decision::Ask);
 

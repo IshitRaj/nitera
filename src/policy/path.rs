@@ -100,11 +100,18 @@ fn normalize_components<'a>(
             }
 
             Component::RootDir => {
-                // Pushing the platform root rather than a literal "/", because
-                // on Windows a rooted path with no drive *replaces* everything
-                // after the drive. Pushing "/" onto "C:" would discard the
-                // drive and turn a drive-qualified path into "/Users/...".
-                normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR));
+                // The separator is only pushed when nothing is buffered yet.
+                //
+                // On Unix the root is always the first component, so this
+                // always pushes and gives "/a/b". On Windows the root can
+                // follow a prefix: pushing a rooted path onto "C:" replaces
+                // everything after the drive and discards it, turning a
+                // drive-qualified path into "/Users/...", and the drive has to
+                // survive. Once "C:" is buffered the separator is already
+                // implied, and pushing another path adds its own.
+                if normalized.as_os_str().is_empty() {
+                    normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR));
+                }
             }
 
             Component::Normal(part) => {
@@ -908,6 +915,36 @@ mod tests {
                 "{kind:?} must not be read as 'not a symlink'"
             );
         }
+    }
+
+    /// A drive prefix must survive normalization.
+    ///
+    /// Every path whose tail does not exist yet goes through the component
+    /// walk rather than `canonicalize`, and the walk sees the root *after* the
+    /// prefix. Pushing a rooted path at that point replaces everything after the
+    /// drive, so `C:\a\b\c` came back as `/a/b/c` and stopped matching the
+    /// policy that named it. Only observable on Windows, which is the only
+    /// platform with a prefix to lose; Unix paths have no prefix and would pass
+    /// regardless, so the test is Windows only rather than dead weight.
+    #[test]
+    #[cfg(windows)]
+    fn a_drive_prefix_survives_normalization() {
+        let scratch = Scratch::new("drive-prefix");
+        let dir = scratch.path();
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+
+        let resolved = resolve_aliases(&dir.join("a/b/c/d")).unwrap();
+        let text = to_policy_string(&resolved);
+        let base = to_policy_string(dir);
+
+        assert!(
+            text.starts_with(&base),
+            "the drive and root must survive: expected a prefix of {base:?}, got {text:?}"
+        );
+        assert!(
+            text.ends_with("/a/b/c/d"),
+            "the missing tail must be kept, got {text:?}"
+        );
     }
 
     /// A component that cannot be inspected must fail resolution rather than
