@@ -11,7 +11,10 @@ env:
 
 jobs:
   build:
-    name: Build & test (Linux)
+    # The job id is also the status-check context, and `main` requires a
+    # check called `build`. Adding a `name:` here would rename that context
+    # and the required check would stop matching, so this job keeps its
+    # default name on purpose.
     runs-on: ubuntu-latest
 
     steps:
