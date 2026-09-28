@@ -2,6 +2,39 @@ use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
+/// The string form used for policy matching and pattern normalization.
+///
+/// Policy files are written with `/` separators, so that is the internal
+/// form for both patterns and requests. A `Path` renders with the platform
+/// separator, so on Windows the backslashes are converted here. This is never
+/// done on Unix, where a backslash is a legal character in a filename.
+pub fn to_policy_string(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
+/// Whether a `read_link` failure means "this component is present and is not
+/// a symlink", as opposed to "the component could not be inspected".
+///
+/// Unix reports `EINVAL` for a non-symlink and Windows reports
+/// `ERROR_NOT_A_REPARSE_POINT`, which surfaces as `InvalidInput`. Every
+/// other kind is an inspection failure and must not be read as a negative
+/// answer, because that would silently keep an unresolvable path.
+fn is_not_a_symlink(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::InvalidInput
+}
+
+/// Strips a leading `~` plus either separator, so a home-relative path is
+/// recognized whichever separator the platform uses.
+fn strip_home_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('~')?;
+    rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\'))
+}
+
 /// Replace a leading `~` with `$HOME`.
 pub fn expand_home(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let path = path.as_ref();
@@ -21,9 +54,11 @@ fn expand_home_with<'a>(path: &'a Path, home: &'a OsStr) -> Cow<'a, Path> {
         return Cow::Borrowed(Path::new(home));
     }
 
+    // Detected in string space, so `~/` is recognized on a platform that
+    // renders the path with backslashes.
     let path_str = path.to_string_lossy();
 
-    if let Some(stripped) = path_str.strip_prefix("~/") {
+    if let Some(stripped) = strip_home_prefix(&path_str) {
         return Cow::Owned(Path::new(home).join(stripped));
     }
 
@@ -255,8 +290,17 @@ fn resolve_components(path: &Path) -> std::io::Result<PathBuf> {
                         resolved.push(name);
                         past_missing = true;
                     }
-                    // Exists and is not a symlink. Keep it.
-                    Err(_) => resolved.push(name),
+                    // Exists and is not a symlink, which is the only
+                    // remaining reason a component that is present can fail
+                    // `read_link`. Any other error means the component could
+                    // not be inspected at all: a non-directory in the middle
+                    // of the path, a permission failure, or a loop. Treating
+                    // those as "not a symlink" would leave an unresolved
+                    // name in the path about to be authorized, which is the
+                    // mismatch this resolver exists to prevent, so
+                    // resolution fails and the operation is refused.
+                    Err(error) if is_not_a_symlink(&error) => resolved.push(name),
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -328,7 +372,7 @@ pub fn resolve_anchor(anchor: &str) -> String {
     }
 
     match resolve_aliases(Path::new(anchor)) {
-        Ok(resolved) => resolved.to_string_lossy().into_owned(),
+        Ok(resolved) => to_policy_string(&resolved),
         // An anchor that cannot be resolved is kept lexical. Resolution
         // failure must never widen access, and the request side fails closed
         // on a path it cannot resolve, so a lexical anchor here cannot grant
@@ -349,19 +393,39 @@ pub fn normalize_runtime_path(path: impl AsRef<Path>) -> std::io::Result<PathBuf
 /// Absolute patterns remain absolute.
 /// `~` is resolved against `$HOME`.
 pub fn normalize_pattern(pattern: &str, base: impl AsRef<Path>) -> std::io::Result<String> {
+    // Everything here works in the `/` policy string form rather than on
+    // `Path`. Deciding whether a pattern is absolute with `Path::is_absolute`
+    // is wrong on Windows, where a `/`-rooted path has a root but no drive and
+    // so is not absolute; that made an absolute pattern get joined onto the
+    // base. A pattern is absolute if its text starts with a separator, a drive
+    // letter, or a UNC `//`.
     let expanded = expand_home(pattern)?;
+    let expanded = to_policy_string(&expanded);
 
-    let absolute = if expanded.is_absolute() {
-        expanded
+    let (anchor, body) = if let Some(rest) = expanded.strip_prefix("\\\\") {
+        // UNC: `//server/share/...`
+        (Some("//"), rest)
+    } else if expanded.len() >= 2
+        && expanded.as_bytes()[1] == b':'
+        && expanded.as_bytes()[0].is_ascii_alphabetic()
+    {
+        // Drive: `C:/...`
+        (Some(&expanded[..2]), &expanded[2..])
+    } else if let Some(rest) = expanded.strip_prefix('/') {
+        (Some("/"), rest)
     } else {
-        base.as_ref().join(expanded)
+        (None, expanded.as_str())
     };
 
-    let expanded = absolute.to_string_lossy();
+    let base_text = to_policy_string(base.as_ref());
+    let body = match anchor {
+        Some(_) => body.to_string(),
+        None => format!("{}/{}", base_text.trim_end_matches('/'), body),
+    };
 
     let mut result = Vec::new();
 
-    for component in expanded.split('/') {
+    for component in body.split('/') {
         match component {
             "" | "." => {}
 
@@ -383,7 +447,17 @@ pub fn normalize_pattern(pattern: &str, base: impl AsRef<Path>) -> std::io::Resu
         }
     }
 
-    Ok(format!("/{}", result.join("/")))
+    let joined = result.join("/");
+
+    // The anchor is reattached in its original form so a drive or UNC prefix
+    // survives normalization, while a bare POSIX root keeps its leading `/`.
+    Ok(match anchor {
+        Some("//") => format!("//{joined}"),
+        // A POSIX root needs no re-separator, a drive does.
+        Some("/") => format!("/{joined}"),
+        Some(drive) => format!("{drive}/{joined}"),
+        None => format!("/{joined}"),
+    })
 }
 
 #[cfg(test)]
@@ -742,6 +816,41 @@ mod tests {
         );
         assert_eq!(resolved, cwd.join("a/missing/leaf.txt"));
         assert!(!dir.join("a").exists() || resolved.starts_with(&cwd));
+    }
+
+    /// A component that cannot be inspected must fail resolution rather than
+    /// be kept as an ordinary name.
+    ///
+    /// Walking through a regular file asks `read_link` about a path whose
+    /// parent is not a directory. That is an inspection failure, not an
+    /// answer of "not a symlink", and the old code treated it as the latter,
+    /// leaving an unresolvable name in the path that was about to be
+    /// authorized.
+    #[test]
+    fn uninspectable_component_fails_resolution() {
+        let scratch = Scratch::new("uninspectable");
+        let dir = scratch.path();
+        // A regular file, so `file/child` cannot be inspected at all.
+        std::fs::write(dir.join("file"), b"x").unwrap();
+
+        let result = resolve_aliases(&dir.join("file/child"));
+        assert!(
+            result.is_err(),
+            "walking through a non-directory must fail, got {result:?}"
+        );
+    }
+
+    /// The same guard for a symlink that cannot be resolved because a
+    /// component above it is not a directory.
+    #[test]
+    fn symlink_under_a_non_directory_is_not_treated_as_a_name() {
+        let scratch = Scratch::new("uninspectable-link");
+        let dir = scratch.path();
+        std::fs::write(dir.join("file"), b"x").unwrap();
+        // The link cannot be created under a file, so the path simply cannot
+        // be resolved. It must be an error, not a silent pass-through.
+        let result = resolve_aliases(&dir.join("file/link/leaf"));
+        assert!(result.is_err(), "expected an error, got {result:?}");
     }
 
     /// A dangling final symlink must resolve to where it points, not stay as

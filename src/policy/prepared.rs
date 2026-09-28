@@ -426,7 +426,8 @@ impl PreparedPolicy {
             return Decision::Deny;
         };
         let path = resolve_runtime_path_with_home(path, base, &home);
-        let path = path.to_string_lossy();
+        // Rendered in the `/` policy form, matching how anchors are stored.
+        let path = super::path::to_policy_string(&path);
         if let Some(rules) = rules {
             return rules.evaluate(&path, mode);
         }

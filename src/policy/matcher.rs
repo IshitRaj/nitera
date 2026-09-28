@@ -39,7 +39,9 @@ impl HostPattern {
 }
 
 fn match_path(pattern: &str, path: &Path) -> bool {
-    let path = path.to_string_lossy();
+    // The pattern is in the `/` policy form, so the request path has to be
+    // rendered the same way, or a Windows request never matches a pattern.
+    let path = super::path::to_policy_string(path);
 
     let pattern_parts: Vec<&str> = pattern.split('/').collect();
     let path_parts: Vec<&str> = path.split('/').collect();
@@ -99,71 +101,93 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use crate::policy::path::to_policy_string;
+    use std::path::{Path, PathBuf};
+
+    /// A directory that is genuinely absolute on this platform.
+    ///
+    /// These tests used to hard-code `/home/user/...`, which is only absolute
+    /// on Unix. On Windows a `/`-rooted path is drive-relative, so it gets
+    /// joined onto the base and can never match, which is why the whole suite
+    /// failed there. Every case below builds from a real absolute root and
+    /// expresses the pattern in the same `/` policy form the matcher uses.
+    fn root() -> PathBuf {
+        std::env::temp_dir().join("nitera-matcher-fixture")
+    }
+
+    /// The policy string for a path under [`root`].
+    fn policy(relative: &str) -> String {
+        format!("{}/{}", to_policy_string(&root()), relative)
+    }
+
+    fn at(relative: &str) -> PathBuf {
+        root().join(relative)
+    }
 
     #[test]
     fn exact_path_matches() {
-        let pattern = PathPattern("/home/user/project/file.txt".into());
+        let path = at("project/file.txt");
+        let pattern = PathPattern(policy("project/file.txt"));
 
-        assert!(pattern.matches(Path::new("/home/user/project/file.txt")));
+        assert!(pattern.matches(&path));
     }
 
     #[test]
     fn different_path_does_not_match() {
-        let pattern = PathPattern("/home/user/project/file.txt".into());
+        let pattern = PathPattern(policy("project/file.txt"));
 
-        assert!(!pattern.matches(Path::new("/home/user/project/other.txt")));
+        assert!(!pattern.matches(&at("project/other.txt")));
     }
 
     #[test]
     fn star_matches_single_component() {
-        let pattern = PathPattern("/home/user/projects/*".into());
+        let pattern = PathPattern(policy("projects/*"));
 
-        assert!(pattern.matches(Path::new("/home/user/projects/app")));
+        assert!(pattern.matches(&at("projects/app")));
 
-        assert!(!pattern.matches(Path::new("/home/user/projects/app/src")));
+        assert!(!pattern.matches(&at("projects/app/src")));
     }
 
     #[test]
     fn double_star_matches_nested_paths() {
-        let pattern = PathPattern("/home/user/projects/**".into());
+        let pattern = PathPattern(policy("projects/**"));
 
-        assert!(pattern.matches(Path::new("/home/user/projects/app")));
+        assert!(pattern.matches(&at("projects/app")));
 
-        assert!(pattern.matches(Path::new("/home/user/projects/app/src/main.rs")));
+        assert!(pattern.matches(&at("projects/app/src/main.rs")));
     }
 
     #[test]
     fn double_star_does_not_match_other_directory() {
-        let pattern = PathPattern("/home/user/projects/**".into());
+        let pattern = PathPattern(policy("projects/**"));
 
-        assert!(!pattern.matches(Path::new("/home/user/documents/file.txt")));
+        assert!(!pattern.matches(&at("documents/file.txt")));
     }
 
     #[test]
     fn relative_pattern_matches_from_base() {
         let pattern = PathPattern("./playground/**".into());
-        let base = Path::new("/home/user/project");
+        let base = at("project");
 
-        assert!(pattern.matches_from(Path::new("./playground/test.txt"), base,));
+        assert!(pattern.matches_from(Path::new("./playground/test.txt"), &base));
     }
 
     #[test]
     fn relative_pattern_without_dot_matches_from_base() {
         let pattern = PathPattern("playground/**".into());
-        let base = Path::new("/home/user/project");
+        let base = at("project");
 
-        assert!(pattern.matches_from(Path::new("playground/test.txt"), base,));
+        assert!(pattern.matches_from(Path::new("playground/test.txt"), &base));
     }
 
     #[test]
     fn absolute_pattern_does_not_use_base() {
-        let pattern = PathPattern("/playground/**".into());
-        let base = Path::new("/home/user/project");
+        let pattern = PathPattern(format!("{}/**", to_policy_string(&at("playground"))));
+        let base = at("project");
 
-        assert!(pattern.matches_from(Path::new("/playground/test.txt"), base,));
+        assert!(pattern.matches_from(&at("playground/test.txt"), &base));
 
-        assert!(!pattern.matches_from(Path::new("/home/user/project/playground/test.txt"), base,));
+        assert!(!pattern.matches_from(&at("project/playground/test.txt"), &base));
     }
 
     #[test]
@@ -177,7 +201,7 @@ mod tests {
             .join("src")
             .join("main.rs");
 
-        assert!(pattern.matches_from(&path, Path::new("/some/other/base"),));
+        assert!(pattern.matches_from(&path, &at("other-base")));
     }
 
     #[test]

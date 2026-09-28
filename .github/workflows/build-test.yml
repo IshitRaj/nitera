@@ -31,15 +31,12 @@ jobs:
   windows:
     name: Build & test (Windows)
     runs-on: windows-latest
-    # Windows support is SECURITY-AUDIT item 3 and is still open: the policy
-    # grammar splits patterns on `/` and normalizes to a leading `/`, which
-    # does not match a `\`-separated path, so 21 pre-existing matcher and
-    # path tests fail there. The job is reported but does not block, so the
-    # failure stays visible and the job turns green on its own once item 3
-    # lands. Remove this line then. Everything here compiles and runs on
-    # Windows; only the path-matching expectations fail.
-    continue-on-error: true
 
+    # A real blocking check. Path matching now works in a single `/` policy
+    # string form for both patterns and request paths, and the root or drive
+    # prefix is detected from the text rather than from `Path::is_absolute`,
+    # which reports false for a `/`-rooted path on Windows. See
+    # SECURITY-AUDIT.md item 3.
     steps:
       - uses: actions/checkout@v7
       - name: Build
