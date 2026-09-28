@@ -1,10 +1,11 @@
 # Security and hardening audit, 1.0.0
 
-**Status: items 6, 12, and 16 are fixed on `main` and will ship in the next
-release. Item 19 is fixed in the repository only, because `examples/` is
-not part of the published package. Items 1, 2, and 18 remain confirmed
-policy bypasses. Item 18 is another instance of unresolved filesystem
-aliases, not an independent vulnerability class.
+**Status: items 1, 6, 12, 16, and 18 are fixed on `main` and will ship in
+the next release. Item 19 is fixed in the repository only, because
+`examples/` is not part of the published package. Item 2, filesystem case
+equivalence, and item 8, hostname case equivalence, remain confirmed
+bypasses and are the next work. Item 18 was the same alias class as item 1,
+not an independent vulnerability class.
 
 This document records findings and a corrected remediation plan. Updating
 the document does not fix the implementation. The original audit targeted
@@ -64,14 +65,14 @@ Numbering matches the detailed findings and sequencing table.
 
 | # | Finding | Class | Evidence | Status |
 |---|---|---|---|---|
-| 1 | Symlink traversal bypasses narrow allows and explicit denies | security | protected synthetic payload returned | open |
-| 2 | Case-insensitive filesystem names bypass case-sensitive denies | security | protected synthetic payload returned on macOS | open |
+| 1 | Symlink traversal bypasses narrow allows and explicit denies | security | protected synthetic payload returned | fixed, unreleased |
+| 2 | Case-insensitive filesystem names bypass case-sensitive denies | security | protected synthetic payload returned on macOS | open, next |
 | 3 | Windows path representation and HOME assumptions | correctness | source inspection; Windows execution required | open |
 | 4 | Commas cannot be represented literally in values | grammar limitation | parser output verified | open |
 | 5 | Hashes start comments even inside intended paths | grammar limitation | parser output verified | open |
 | 6 | Repeated whitespace between action and kind breaks parsing | correctness | original error reproduced; regression tests added | fixed, unreleased (#3) |
 | 7 | Process arguments are not evaluated | model gap | policy decisions verified | open |
-| 8 | Network ports are not evaluated | model gap | decisions for several ports verified | open |
+| 8 | Network ports are not evaluated, and hosts match byte-case-sensitively | model gap | decisions for several ports verified | open, next |
 | 9 | Child environment and executable lookup are inherited | model gap | synthetic environment inheritance verified; lookup inspected | open |
 | 10 | Filesystem operation coverage is incomplete | model gap | public API inspected | open |
 | 11 | create_dir creates only one level | feature limitation | missing-parent error verified | open |
@@ -81,7 +82,7 @@ Numbering matches the detailed findings and sequencing table.
 | 15 | Public types have compatibility constraints on extension | API evolution | type definitions inspected | open |
 | 16 | Nitera lacks Debug in 1.0.0 | ergonomics | implementation and regression test reviewed | fixed, unreleased (#3) |
 | 17 | Normalization errors become nonmatching patterns | latent hardening concern | missing-HOME scenario fails closed | open; no demonstrated bypass |
-| 18 | /tmp versus /private/tmp alias can bypass a deny | security, related to #1 | protected synthetic payload returned | open |
+| 18 | /tmp versus /private/tmp alias can bypass a deny | security, related to #1 | protected synthetic payload returned | fixed, unreleased |
 | 19 | Example host allow is overridden by deny host * | documentation | resulting Deny verified | fixed, repository only |
 
 ## Security and platform correctness
@@ -136,6 +137,79 @@ path depth, caches, and filesystem. Rust's `canonicalize` uses Unix
 Measure end-to-end guarded operations separately from lexical `check()`.
 This is a substantial security change, not a one-helper patch.
 
+**Status: fixed, unreleased.** Guarded filesystem operations now authorize
+the resolved location, and policy anchors are resolved at load time, which
+closes both item 1 and item 18. Decisions taken, and why:
+
+1. *Both sides resolved.* Requests and policy anchors must be resolved
+   together. Resolving only the request is a fail-open: a rule written
+   `deny read /tmp/fixture/**` would stop matching a request resolved to
+   `/private/tmp/fixture/**`, and a broad `allow` would then win over the
+   `deny` the author wrote. Anchor resolution is mandatory, not cosmetic.
+2. *Anchors resolved at load, not per check.* A wildcard component is not a
+   filename and cannot be canonicalized, so each rule's literal prefix is
+   resolved once at preparation and its glob tail is left alone. A check
+   still performs no filesystem I/O, so `check()` keeps its measured cost.
+3. *`check()` stays lexical and advisory.* It performs no filesystem access
+   and therefore does not resolve aliases. It can disagree with a guarded
+   operation on an aliased path, and the regression tests assert that
+   disagreement deliberately, so callers cannot mistake `check()` for an
+   enforcement result. Guarded methods never trust an earlier `check()`
+   verdict; each authorizes its own resolved path.
+4. *Race stance: static aliases only.* This mitigates aliases that already
+   exist when the check runs. It does **not** resist an attacker who can
+   replace a directory entry between authorization and open. That is a
+   TOCTOU race requiring descriptor-relative or capability-based access,
+   which is `cap-std`'s job. This is stated as a limit rather than claimed
+   as safe, and no test here claims race resistance.
+5. *Per-operation semantics.* `read`, `write`, `create`, and `create_dir`
+   resolve the target, so a symlinked target is judged by where it lands.
+   `delete` resolves only the parent and keeps the final component literal,
+   because unlinking a symlink removes the link rather than its target.
+   `execute` resolves the working directory, since that is a location a
+   child process actually runs in.
+   Resolution walks components rather than canonicalizing the whole path,
+   because a **dangling final symlink** cannot be canonicalized at all. The
+   first version of this change walked to the nearest existing ancestor and
+   re-appended the tail, which left such a link unresolved: the guard then
+   authorized `<dir>/link` while the kernel wrote through it to the target.
+   Verified as a live bypass against `deny write ./denied/**`, and fixed.
+6. *No resolution when nothing is authorized.* An operation with no rules
+   of any action is denied before any filesystem work, so a policy that
+   never mentions an operation pays nothing for the check.
+
+A `delete` that removes a symlink passes its own location to the policy,
+while `execute` authorizes its resolved working directory. `connect` is
+unaffected, because a host has no filesystem alias to resolve.
+
+**Measured cost.** `benches/guarded_operation.rs` reports the three numbers
+separately, because `check()` alone must not stand for the library:
+
+| Workload | Median | p95 | p99 |
+|---|---|---|---|
+| `load`, 1,000 rules | 10.5 ms | 11.0 ms | 11.0 ms |
+| `check()`, 1,000 rules, lexical | 292 ns | 333 ns | 417 ns |
+| `canonicalize` alone | 11.3 us | 15.5 us | 17.8 us |
+| guarded `read`, end to end | 26.3 us | 31.5 us | 36.9 us |
+
+**When each cost is paid:**
+
+- *At load, once.* Resolving anchors made loading O(rules) in filesystem
+  calls instead of pure string work, about 10.5 us per rule, so roughly
+  10 ms for a 1,000-rule policy. This is the largest cost added and the one
+  easiest to overlook, because it is not visible in a per-check measurement.
+  It does not grow with traffic. Deduplicating repeated anchors is the
+  obvious follow-up.
+- *Per guarded filesystem call.* One `canonicalize` before authorization,
+  which roughly doubles a small read, from about 15 us to about 26 us.
+- *Per `check()` call.* Nothing. That path stays lexical and filesystem-free,
+  which is why its measured cost is unchanged.
+- *Never, for an unmentioned operation.* Denied before any resolution.
+
+An earlier estimate in the original audit of 1 to 2 us for a single extra
+syscall was wrong by roughly a factor of five; `realpath` walks every
+component, and the load-time anchor resolution had not been measured at all.
+
 ### 2. Case-folding and equivalent filesystem names
 
 With `deny read ./Secrets/**` and `allow read ./**`, requesting
@@ -175,6 +249,15 @@ public and prepared evaluators. Two matching implementations can share a bug.
 **Cost and scope.** Unmeasured. Comparison, key preparation, platform queries,
 and index design can affect load time and checks. This depends on item 1's
 path model and requires platform-specific tests, not a one-function fix.
+
+**Status: open.** Item 1's path model now exists, so the remaining work is
+the equivalence decision itself. Not taken in the same change, because
+case-insensitive comparison has to be applied to `PreparedPath`'s equality,
+prefix stripping and glob comparisons *and* to `PathSet`'s candidate
+ordering, or the index will exclude candidates the matcher could match.
+Changing only the public `component_matches` would leave the loaded path
+vulnerable, which is why the earlier estimate of a one-function fix was
+wrong.
 
 ### 3. Windows path handling
 
@@ -296,6 +379,11 @@ new redirected connection separately.
 precedence, invalid ranges, IPv6, hostname casing, and controlled local
 connections. Port checks add small but nonzero work. DNS/address enforcement
 is a separate capability and needs its own tests and measurements.
+
+**Status: open.** The hostname-casing half of this item is independent of
+the path work and would be a small, self-contained change to
+`host_matches`, but it is not in this change. Regression
+`audit_item8_miscased_host_defeats_deny` is committed and failing.
 
 ### 9. Environment and executable lookup
 
@@ -491,6 +579,12 @@ actually used; do not rely on users spelling every alias canonically.
 allows, and supported operations. Run the actual alias case on macOS and
 an explicit directory-symlink analogue where the /tmp alias is absent.
 
+**Status: fixed, unreleased.** Closed by the same resolved-authorization
+change as item 1, and by the same reasoning: the request is resolved to
+`/private/tmp/...` and the policy root was already canonical at load, so
+the deny anchored at the canonical root now matches the alias spelling.
+Covered by `audit_item18_alias_defeates_deny`.
+
 ### 19. Contradictory example policy
 
 `examples/playground.nitera` contains `allow host api.github.com` followed
@@ -542,10 +636,11 @@ across changes that temporarily allow requests the policy should deny.
 | Order | Items | Deliverable and acceptance gate |
 |---|---|---|
 | Already merged | 6, 12, 16 | Preserve fixes from #3 and test cleanup from #5; track release status. |
+| In progress | 1, 18 | Resolved, operation-aware authorization; lexical and resolved anchor forms; guarded-operation benchmark. |
 | Landed early | 19 | Example policy corrected independently of the path work; repository only, no release carries it. |
 | 1 | 1, 2, 3, 18 | Commit isolated bypass regressions and a platform/path semantics contract; distinguish static-alias mitigation from race resistance. |
-| 2 | 1, 18 | Implement shared, operation-aware resolved authorization; pass symlink, alias, creation, deletion, and cwd checks; benchmark guarded operations. |
-| 3 | 2, 3 | Enforce supported filesystem name equivalence through both matchers and candidate indexes; reject unsupported enforcement modes; run platform tests. |
+| 2 | 1, 18 | Superseded by the in-progress row above. |
+| 3 | 2, 3, 8 | Enforce supported filesystem name equivalence through both matchers and candidate indexes, and hostname equivalence; reject unsupported enforcement modes; run platform tests. |
 | 4 | 13, 17 | Remove unnecessary home lookup without permitting unresolved deny rules; pass isolated environment-transition tests. |
 | 5 | 4, 5 | Approve a versioned quote/escape grammar; preserve or explicitly migrate legacy values; pass parsing and decision regressions. |
 | 6 | 19 | Correct the example and verify intended host decisions. This independent docs fix may land earlier. |

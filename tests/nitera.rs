@@ -27,11 +27,104 @@ fn unique_path(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("nitera-{tag}-{}-{n}-{nanos}", std::process::id()))
 }
 
+/// True when this platform lets the test create a symlink.
+///
+/// The symlink regressions need a real link. Off unix they report that they
+/// are skipped rather than passing for the wrong reason.
+fn symlinks_available() -> bool {
+    cfg!(unix)
+}
+
+/// The location a create request is authorized against.
+///
+/// A guarded operation resolves the path before authorizing it, so the
+/// request the approval handler receives carries the resolved location
+/// rather than the caller's spelling. For a path that does not exist yet
+/// that is the resolved parent plus the literal final component.
+fn resolved_entry_location(target: &std::path::Path) -> std::path::PathBuf {
+    target
+        .parent()
+        .expect("target has a parent")
+        .canonicalize()
+        .expect("parent exists")
+        .join(target.file_name().expect("target has a name"))
+}
+
 /// Writes a one-line policy to a temporary file and loads it.
 ///
 /// Returns the loaded `Nitera` alongside the policy file's path. The
 /// caller owns that file and must remove it before returning, so bind
 /// the whole tuple rather than discarding the path with `.0`.
+/// A scratch directory that removes itself when the guard drops.
+///
+/// Used by the SECURITY-AUDIT bypass regressions, which need a real
+/// directory tree (symlinks, case-insensitive names) rather than a
+/// policy string in isolation.
+struct Tree {
+    path: std::path::PathBuf,
+}
+
+impl Tree {
+    fn new(tag: &str) -> Self {
+        Self::at(&std::env::temp_dir(), tag)
+    }
+
+    /// Creates the tree under a specific base directory.
+    ///
+    /// Item 18 needs this: on macOS the real scenario is a policy rooted at
+    /// `/tmp/<dir>`, which canonicalizes to `/private/tmp/<dir>`, and a
+    /// request spelled with the `/tmp` alias. Both spellings have to name
+    /// the same real directory, so the tree must itself be under `/tmp`.
+    fn at(base: &std::path::Path, tag: &str) -> Self {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = base.join(format!(
+            "nitera-tree-{tag}-{}-{n}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn file(&self, relative: &str, contents: &[u8]) -> std::path::PathBuf {
+        let target = self.path.join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, contents).unwrap();
+        target
+    }
+
+    fn dir(&self, relative: &str) -> std::path::PathBuf {
+        let target = self.path.join(relative);
+        fs::create_dir_all(&target).unwrap();
+        target
+    }
+
+    /// Loads a policy written into this tree and returns the handle.
+    fn load(&self, policy: &[u8]) -> Nitera {
+        let policy_path = self.file("policy.nitera", policy);
+        Nitera::load(&policy_path).expect("policy should load")
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Whether this volume resolves names that differ only in ASCII case.
+///
+/// Item 2 cannot exist on a case-sensitive volume, so the regression
+/// reports that and returns rather than asserting something untrue.
+fn volume_is_case_insensitive(tree: &Tree) -> bool {
+    tree.file("CaseProbe", b"x");
+    tree.path.join("caseprobe").exists()
+}
+
 fn nitera_with_create_rule(action: &str, target: &std::path::Path) -> (Nitera, std::path::PathBuf) {
     let policy_path = temp_policy_path();
     fs::write(
@@ -1232,7 +1325,7 @@ fn create_deny_rule_blocks_a_directory() {
 #[test]
 fn create_ask_approved_creates_a_file_and_labels_the_request() {
     let target = unique_path("create-file-asked.txt");
-    let expected_request = format!("Create file {}", target.display());
+    let expected_request = format!("Create file {}", resolved_entry_location(&target).display());
     let (nitera, policy_path) = nitera_with_create_rule("ask", &target);
     let nitera = nitera.with_approval_handler(move |request: &NiteraRequest| {
         assert_eq!(request.to_string(), expected_request);
@@ -1249,7 +1342,10 @@ fn create_ask_approved_creates_a_file_and_labels_the_request() {
 #[test]
 fn create_ask_approved_creates_a_directory_and_labels_the_request() {
     let target = unique_path("create-directory-asked");
-    let expected_request = format!("Create directory {}", target.display());
+    let expected_request = format!(
+        "Create directory {}",
+        resolved_entry_location(&target).display()
+    );
     let (nitera, policy_path) = nitera_with_create_rule("ask", &target);
     let nitera = nitera.with_approval_handler(move |request: &NiteraRequest| {
         assert_eq!(request.to_string(), expected_request);
@@ -1297,7 +1393,12 @@ fn create_reports_already_exists_for_an_existing_file_after_authorization() {
 
     let result = nitera.create(&target, b"new contents");
 
-    assert!(matches!(result, Err(NiteraOperationError::AlreadyExists(path)) if path == target));
+    // The reported path is the resolved entry location, which is the entry
+    // that was actually found on disk.
+    assert!(
+        matches!(result, Err(NiteraOperationError::AlreadyExists(path)) if path ==
+            resolved_entry_location(&target))
+    );
     fs::remove_file(target).unwrap();
     fs::remove_file(policy_path).unwrap();
 }
@@ -1323,7 +1424,12 @@ fn create_reports_already_exists_for_an_existing_directory_after_authorization()
 
     let result = nitera.create_dir(&target);
 
-    assert!(matches!(result, Err(NiteraOperationError::AlreadyExists(path)) if path == target));
+    // The reported path is the resolved entry location, which is the entry
+    // that was actually found on disk.
+    assert!(
+        matches!(result, Err(NiteraOperationError::AlreadyExists(path)) if path ==
+            resolved_entry_location(&target))
+    );
     fs::remove_dir(target).unwrap();
     fs::remove_file(policy_path).unwrap();
 }
@@ -1366,6 +1472,7 @@ fn still_rejects_other_extensions() {
     let dir = unique_path("wrong-ext");
     fs::create_dir_all(&dir).unwrap();
 
+    // `policy.nitersa` is a near-miss extension, not the dotfile form.
     for name in ["policy.nitersa", "policy.txt", "policy", ".nitera.bak"] {
         let path = dir.join(name);
         fs::write(&path, "[filesystem]\n").unwrap();
@@ -1396,4 +1503,484 @@ fn nitera_is_debug_formattable() {
 
     fs::remove_file(policy_path).unwrap();
     fs::remove_file(handler_policy_path).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// SECURITY-AUDIT bypass regressions, items 1, 2, 8, and 18.
+//
+// Written before the fixes, so each one fails against current `main`. They
+// are `#[ignore]`d for that reason: `main` requires `cargo test` to pass,
+// so a deliberately failing test cannot land until its fix does. Drop the
+// attribute when the item is fixed and the test becomes a permanent guard.
+//
+// Run them with:
+//
+//     cargo test --test nitera -- --ignored audit
+//
+// Each pairs the bypass with a control assertion. Without the control a
+// test could pass simply by denying everything, hiding the defect rather
+// than catching it.
+// ---------------------------------------------------------------------------
+
+/// Item 1: a symlink inside an allowed directory reaches a denied file.
+#[test]
+fn audit_item1_symlink_defeats_explicit_deny() {
+    let tree = Tree::new("item1");
+    tree.file("Secrets/key", b"SYMLINK PAYLOAD");
+    let n = tree.load(b"[filesystem]\nallow read ./allowed/**\ndeny read ./Secrets/**\n");
+
+    // Create only the parent; the link itself must not exist yet.
+    tree.dir("allowed");
+    if !symlinks_available() {
+        eprintln!("reported as skipped: symlinks are not creatable on this platform");
+        return;
+    }
+    std::os::unix::fs::symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape"))
+        .unwrap();
+
+    // Control: the direct spelling is denied, so the policy is loaded and
+    // the deny rule is present.
+    assert_eq!(
+        n.check(&NiteraRequest::filesystem(Operation::Read, "./Secrets/key")),
+        Decision::Deny,
+        "control: the direct path must be denied"
+    );
+    // The guarded operation is the security boundary: it authorizes the
+    // resolved location, so a symlink cannot reach a denied file. The error
+    // variant is asserted rather than `is_err`, so a read that failed for an
+    // unrelated reason cannot pass this test.
+    assert!(
+        matches!(
+            n.read("./allowed/escape/key"),
+            Err(NiteraOperationError::Denied)
+        ),
+        "item 1: the guarded read reached the denied file through a symlink"
+    );
+
+    // `check` stays lexical and advisory, so it still reports Allow here.
+    // The split is deliberate and pinned by this assertion so it cannot
+    // change by accident: a caller must not treat `check` as enforcement.
+    assert_eq!(
+        n.check(&NiteraRequest::filesystem(
+            Operation::Read,
+            "./allowed/escape/key"
+        )),
+        Decision::Allow,
+        "check is advisory and lexical; it does not resolve aliases"
+    );
+}
+
+/// Item 1 through the prepared index, which selects candidates with its
+/// own byte-sensitive comparisons in `prepared.rs`.
+#[test]
+fn audit_item1_symlink_defeats_deny_with_index() {
+    let tree = Tree::new("item1-index");
+    tree.file("Secrets/key", b"SYMLINK PAYLOAD");
+
+    let mut policy = String::from("[filesystem]\n");
+    for i in 0..70 {
+        policy.push_str(&format!("allow read ./group{i}/**\n"));
+    }
+    policy.push_str("allow read ./allowed/**\ndeny read ./Secrets/**\n");
+    let n = tree.load(policy.as_bytes());
+
+    // Create only the parent; the link itself must not exist yet.
+    tree.dir("allowed");
+    if !symlinks_available() {
+        eprintln!("reported as skipped: symlinks are not creatable on this platform");
+        return;
+    }
+    std::os::unix::fs::symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape"))
+        .unwrap();
+
+    assert_eq!(
+        n.check(&NiteraRequest::filesystem(Operation::Read, "./Secrets/key")),
+        Decision::Deny
+    );
+    assert!(
+        matches!(
+            n.read("./allowed/escape/key"),
+            Err(NiteraOperationError::Denied)
+        ),
+        "item 1: the guarded read reached the denied file with the index engaged"
+    );
+}
+
+/// Item 2: a mis-cased path skips a case-sensitive deny on a
+/// case-insensitive volume. No symlink is needed.
+#[test]
+#[ignore = "item 2 open: mis-cased path skips a case-sensitive deny"]
+fn audit_item2_miscased_path_defeats_deny() {
+    let tree = Tree::new("item2");
+    if !volume_is_case_insensitive(&tree) {
+        eprintln!("reported as skipped: volume is case-sensitive, item 2 cannot apply here");
+        return;
+    }
+    tree.file("Secrets/key", b"CASE PAYLOAD");
+    let n = tree.load(b"[filesystem]\ndeny read ./Secrets/**\nallow read ./**\n");
+
+    // Control: correctly cased request is denied.
+    assert_eq!(
+        n.check(&NiteraRequest::filesystem(Operation::Read, "./Secrets/key")),
+        Decision::Deny,
+        "control: the correctly cased path must be denied"
+    );
+
+    assert_eq!(
+        n.check(&NiteraRequest::filesystem(Operation::Read, "./secrets/key")),
+        Decision::Deny,
+        "item 2: a mis-cased path skipped the deny"
+    );
+    assert!(
+        matches!(n.read("./secrets/key"), Err(NiteraOperationError::Denied)),
+        "item 2: the guarded read reached the denied file"
+    );
+}
+
+/// Item 2 through the prepared index.
+#[test]
+#[ignore = "item 2 open: mis-cased path skips the deny once the index engages"]
+fn audit_item2_miscased_path_defeats_deny_with_index() {
+    let tree = Tree::new("item2-index");
+    if !volume_is_case_insensitive(&tree) {
+        eprintln!("reported as skipped: volume is case-sensitive, item 2 cannot apply here");
+        return;
+    }
+    tree.file("Secrets/key", b"CASE PAYLOAD");
+
+    let mut policy = String::from("[filesystem]\n");
+    for i in 0..70 {
+        policy.push_str(&format!("allow read ./group{i}/**\n"));
+    }
+    policy.push_str("deny read ./Secrets/**\nallow read ./**\n");
+    let n = tree.load(policy.as_bytes());
+
+    assert_eq!(
+        n.check(&NiteraRequest::filesystem(Operation::Read, "./Secrets/key")),
+        Decision::Deny
+    );
+    assert_eq!(
+        n.check(&NiteraRequest::filesystem(Operation::Read, "./secrets/key")),
+        Decision::Deny,
+        "item 2: bypass survives the indexed lookup"
+    );
+}
+
+/// Item 18: a policy root reached through an alias, such as macOS
+/// `/tmp`, skips a deny anchored at the canonical root.
+#[test]
+fn audit_item18_alias_defeats_deny() {
+    if !cfg!(target_os = "macos") {
+        eprintln!("reported as skipped: the /tmp alias only exists on macOS");
+        return;
+    }
+    // The tree must live under /tmp, because the scenario is a policy rooted
+    // at /tmp/<dir> with a request spelled using the /tmp alias. A tree under
+    // the default temp dir would make the alias name a directory that does
+    // not exist, and the read would fail with Io rather than Deny, which
+    // would let this test pass without proving anything.
+    let tree = Tree::at(std::path::Path::new("/tmp"), "item18");
+    tree.file("key", b"ALIAS PAYLOAD");
+    // The audit's own reproducer.
+    let n = tree.load(b"[filesystem]\nallow read /**\ndeny read ./**\n");
+
+    // Control: the relative spelling is denied by the canonical-root deny.
+    assert!(
+        matches!(n.read("./key"), Err(NiteraOperationError::Denied)),
+        "control: the relative path must be denied"
+    );
+
+    let alias = std::path::Path::new("/tmp")
+        .join(tree.path.file_name().unwrap())
+        .join("key");
+
+    // Sanity: the alias spelling must name the same real file, and must
+    // differ as a string from the canonical one. Without both of these the
+    // assertions below would be meaningless.
+    assert!(
+        alias.exists(),
+        "the /tmp alias must resolve to the same file, or this proves nothing"
+    );
+    assert_ne!(
+        alias,
+        alias.canonicalize().unwrap(),
+        "the /tmp spelling must differ from its canonical form, or there is no alias to defeat"
+    );
+
+    assert!(
+        matches!(n.read(&alias), Err(NiteraOperationError::Denied)),
+        "item 18: the guarded read reached the denied file through the alias"
+    );
+    assert_eq!(
+        n.check(&NiteraRequest::filesystem(Operation::Read, &alias)),
+        Decision::Allow,
+        "check is advisory and lexical; the alias is not resolved there"
+    );
+}
+
+/// Item 8: hostnames are matched byte-case-sensitively, so a mis-cased
+/// host skips a deny on an allow-listed network.
+#[test]
+#[ignore = "item 8 open: a mis-cased hostname skips the deny"]
+fn audit_item8_miscased_host_defeats_deny() {
+    let tree = Tree::new("item8");
+    let n = tree.load(b"[network]\ndeny host api.github.com\nallow host *\n");
+
+    // Control: the correctly cased host is denied.
+    assert_eq!(
+        n.check(&NiteraRequest::network("api.github.com", 443)),
+        Decision::Deny,
+        "control: the correctly cased host must be denied"
+    );
+
+    for host in ["API.GITHUB.COM", "Api.GitHub.Com"] {
+        assert_eq!(
+            n.check(&NiteraRequest::network(host, 443)),
+            Decision::Deny,
+            "item 8: mis-cased host {host} skipped the deny"
+        );
+    }
+
+    // Control in the other direction: an unrelated host stays allowed, so
+    // this cannot pass by denying everything.
+    assert_eq!(
+        n.check(&NiteraRequest::network("example.com", 443)),
+        Decision::Allow,
+        "control: an unrelated host must stay allowed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Guards on the resolved-authorization change. These do not test a bypass;
+// they test that resolving did not quietly widen or narrow access.
+// ---------------------------------------------------------------------------
+
+/// A deny written against an absolute path must still fire when the caller
+/// asks for that path through a symlinked directory inside an allowed tree.
+///
+/// This is the fail-open the audit warned about: if the request were
+/// resolved but the deny anchor were not, the deny would stop matching and
+/// a broad allow would win.
+#[test]
+fn deny_anchor_survives_a_symlinked_request_path() {
+    let tree = Tree::new("guard-anchor");
+    tree.file("Secrets/key", b"PAYLOAD");
+    // The deny anchor is absolute and in the resolved spelling.
+    // Canonicalize the anchor exactly as a policy author would write it,
+    // then add the separator explicitly: `display()` has no trailing slash.
+    let anchor = tree.path.canonicalize().unwrap();
+    let deny = format!("deny read {}/Secrets/**\n", anchor.display());
+    let policy = format!("[filesystem]\nallow read ./**\n{deny}");
+    let n = tree.load(policy.as_bytes());
+
+    tree.dir("allowed");
+    if !symlinks_available() {
+        eprintln!("reported as skipped: symlinks are not creatable on this platform");
+        return;
+    }
+    std::os::unix::fs::symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape"))
+        .unwrap();
+
+    let r = n.read("./allowed/escape/key");
+    assert!(
+        matches!(r, Err(NiteraOperationError::Denied)),
+        "an absolute deny anchor must survive a symlinked request path"
+    );
+}
+
+/// An operation with no rules must be denied without any filesystem work,
+/// including when the path could not be resolved at all.
+#[test]
+fn unmentioned_operation_is_denied_and_never_resolves() {
+    let tree = Tree::new("guard-empty");
+    // Only read rules. Write, delete, and create are all unmentioned.
+    let n = tree.load(b"[filesystem]\nallow read ./**\n");
+
+    // A path that does not exist and whose parent does not either, so any
+    // resolution attempt would have to walk and fail.
+    let missing = tree.path.join("no/such/parent/file.txt");
+
+    assert!(matches!(
+        n.write(&missing, b"x"),
+        Err(NiteraOperationError::Denied)
+    ));
+    assert!(matches!(
+        n.delete(&missing),
+        Err(NiteraOperationError::Denied)
+    ));
+    assert!(matches!(
+        n.create(&missing, b"x"),
+        Err(NiteraOperationError::Denied)
+    ));
+    assert!(matches!(
+        n.create_dir(&missing),
+        Err(NiteraOperationError::Denied)
+    ));
+}
+
+/// An allow-list that does not cover the resolved location must still deny.
+///
+/// Guards against resolution accidentally reinterpreting a rule as a
+/// broader match.
+#[test]
+fn allow_outside_the_resolved_tree_stays_denied() {
+    let tree = Tree::new("guard-outside");
+    let outside = tree.dir("outside");
+    tree.file("outside/secret", b"SECRET");
+
+    let n = tree.load(b"[filesystem]\nallow read ./inside/**\n");
+
+    // `matches!` cannot carry a message, so the reasons are asserted first.
+    assert!(
+        matches!(
+            n.read(outside.join("secret")),
+            Err(NiteraOperationError::Denied)
+        ),
+        "an absolute path outside the allowed tree must stay denied"
+    );
+    assert!(
+        matches!(
+            n.read("./outside/secret"),
+            Err(NiteraOperationError::Denied)
+        ),
+        "a relative path outside the allowed tree must stay denied"
+    );
+}
+
+/// `delete` must judge a symlink by its own location, not its target.
+///
+/// Removing a symlink is not the same operation as deleting what it points
+/// at, so the target being inside an allowed tree must not make the link
+/// itself deletable, and the reverse must also hold.
+#[test]
+fn delete_judges_a_symlink_by_its_own_location() {
+    let tree = Tree::new("guard-delete");
+    tree.file("target/keep", b"KEEP");
+    tree.dir("links");
+
+    if !symlinks_available() {
+        eprintln!("reported as skipped: symlinks are not creatable on this platform");
+        return;
+    }
+    std::os::unix::fs::symlink(tree.path.join("target"), tree.path.join("links/point")).unwrap();
+
+    // `./target/**` is readable, `./links/**` is not deletable.
+    let n = tree.load(b"[filesystem]\nallow read ./target/**\nallow delete ./target/**\n");
+
+    // Deleting through the link is denied, because the link lives in
+    // ./links, which has no delete rule.
+    assert!(
+        matches!(n.delete("./links/point"), Err(NiteraOperationError::Denied)),
+        "delete must judge the link's own location, not its target"
+    );
+}
+
+/// `execute` must authorize the resolved working directory, not the
+/// caller's spelling of it.
+///
+/// A symlinked `cwd` inside an allowed scope resolves to a directory outside
+/// it, and the scope check has to see the resolved location or a command
+/// would run somewhere the policy never permitted.
+#[test]
+fn execute_authorizes_the_resolved_working_directory() {
+    let tree = Tree::new("guard-exec");
+    tree.dir("work");
+    tree.dir("outside");
+
+    // The scope covers ./work/**, and only `true` is allowed to run there.
+    let n = tree.load(b"[process]\nallow command true\nallow scope ./work/**\n");
+
+    // A symlink inside the scoped directory that points out of it.
+    if !symlinks_available() {
+        eprintln!("reported as skipped: symlinks are not creatable on this platform");
+        return;
+    }
+    std::os::unix::fs::symlink(tree.path.join("outside"), tree.path.join("work/escape")).unwrap();
+
+    // Running in the scoped directory directly is allowed.
+    assert!(
+        n.execute("true", Vec::<String>::new(), "./work").is_ok(),
+        "the scoped directory itself must still be usable"
+    );
+
+    // Running through the symlink must not be, because it resolves outside
+    // the scope.
+    assert!(
+        matches!(
+            n.execute("true", Vec::<String>::new(), "./work/escape"),
+            Err(NiteraOperationError::Denied)
+        ),
+        "a symlinked cwd must not escape the allowed scope"
+    );
+}
+
+/// A dangling symlink must not let `write` plant bytes in a denied
+/// directory.
+///
+/// The final symlink's target does not exist, so `canonicalize` cannot
+/// resolve the path. An implementation that walked to the nearest existing
+/// ancestor and appended the tail would authorize the *link* while the
+/// kernel wrote through it to the *target*, and the deny would never fire.
+#[test]
+fn dangling_symlink_cannot_plant_bytes_in_a_denied_directory() {
+    let tree = Tree::new("guard-dangling");
+    tree.dir("denied");
+    tree.dir("a");
+
+    if !symlinks_available() {
+        eprintln!("reported as skipped: symlinks are not creatable on this platform");
+        return;
+    }
+    // Dangling: `denied/planted` does not exist yet.
+    std::os::unix::fs::symlink(tree.path.join("denied/planted"), tree.path.join("a/link")).unwrap();
+    assert!(
+        !tree.path.join("denied/planted").exists(),
+        "the symlink target must not exist for this to be the dangling case"
+    );
+
+    let n = tree.load(b"[filesystem]\nallow write ./**\ndeny write ./denied/**\n");
+
+    let result = n.write("./a/link", b"PLANTED");
+    assert!(
+        matches!(result, Err(NiteraOperationError::Denied)),
+        "a write through a dangling symlink into a denied directory must be denied, got {result:?}"
+    );
+    assert!(
+        !tree.path.join("denied/planted").exists(),
+        "no bytes may be planted in the denied directory"
+    );
+}
+
+/// `create` through a dangling symlink must not reach the target directory.
+///
+/// `create` authorizes the *entry's own location* rather than its target,
+/// because creating a new entry never writes through a link. Here the link
+/// already exists, so the exclusive create refuses it and reports
+/// `AlreadyExists`. Either refusal is fine; what matters is that nothing
+/// appears in the denied directory and the call does not succeed.
+#[test]
+fn dangling_symlink_cannot_create_in_a_denied_directory() {
+    let tree = Tree::new("guard-dangling-create");
+    tree.dir("denied");
+    tree.dir("a");
+
+    if !symlinks_available() {
+        eprintln!("reported as skipped: symlinks are not creatable on this platform");
+        return;
+    }
+    std::os::unix::fs::symlink(tree.path.join("denied/fresh"), tree.path.join("a/link")).unwrap();
+
+    let n = tree.load(b"[filesystem]\nallow create ./**\ndeny create ./denied/**\n");
+
+    match n.create("./a/link", b"x") {
+        Ok(()) => panic!("create through a dangling symlink must not succeed"),
+        Err(NiteraOperationError::Denied) => {}
+        // The link already exists, so the exclusive create refuses it.
+        Err(NiteraOperationError::AlreadyExists(_)) => {}
+        Err(other) => panic!("unexpected error: {other:?}"),
+    }
+    assert!(
+        !tree.path.join("denied/fresh").exists(),
+        "no entry may be created in the denied directory"
+    );
 }

@@ -20,4 +20,8 @@ include = [
 name = "policy_check"
 harness = false
 
+[[bench]]
+name = "guarded_operation"
+harness = false
+
 [dependencies]

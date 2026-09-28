@@ -97,6 +97,10 @@ Paths can be relative, absolute, or `~`-prefixed, and support `*` (single segmen
 
 `Nitera::load()` prepares path patterns once. Checks use a scan for small or broad rule sets and a sorted prefix index for larger, selective sets. The index only selects candidates; the matcher still checks each candidate, with `deny` taking priority over `ask`, then `allow`.
 
+Guarded operations (`read`, `write`, `delete`, `create`, `create_dir`, `execute`) resolve the requested path to the location the operating system will actually use, and authorize **that** location. Policy anchors are resolved the same way when the policy is loaded. This matters because a path can name a different file than it reaches: a symlink inside an allowed directory, or a prefix like macOS `/tmp` that is really `/private/tmp`. Without resolving both sides, an explicit `deny` can be stepped over and a broad `allow` wins instead.
+
+`Nitera::check()` is the exception. It is advisory: it matches paths lexically, does no filesystem access, and therefore does not see through those aliases. It can disagree with a guarded operation on an aliased path. Use it to preview a decision, not to enforce one; the guarded methods are the boundary.
+
 Filesystem rules and process scopes use this lookup. Command and host rules keep their existing matching behavior. Preparation adds some load-time work and memory, but no external dependencies or changes to the public API.
 
 If `HOME` changes after loading, Nitera uses the original policy evaluator so home-relative rules follow the current value. Filesystem and process path checks fail closed when `HOME` is unset. See [evaluation of loaded policies](DOCUMENTATION.md#evaluation-of-loaded-policies) for the details.
@@ -170,4 +174,6 @@ cargo test
 
 Nitera is a library-level enforcement API. It controls operations performed through the `Nitera` API; it does not prevent an application from directly using `std::fs`, `std::process`, networking APIs, or other libraries to bypass Nitera.
 
-Path authorization is currently based on normalized paths and patterns rather than OS-level sandboxing. Symlink resolution is not currently handled as a separate security boundary and may be addressed in a future version.
+Path authorization is pattern matching over resolved paths, not OS-level sandboxing. Nitera resolves aliases that exist at the moment of the check, but there is still a window between authorizing a path and opening it. An attacker able to replace a directory entry in that window is not defended against; closing that needs descriptor-relative or capability-based access.
+
+Path names are also compared case-sensitively, while macOS and Windows filesystems are usually case-insensitive, and hostnames are compared case-sensitively even though DNS names are not. A `deny` can therefore be stepped over by changing the case of the request. Both are tracked in [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md) as items 2 and 8.

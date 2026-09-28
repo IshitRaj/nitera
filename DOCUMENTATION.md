@@ -157,6 +157,8 @@ pub fn check(&self, request: &NiteraRequest) -> Decision
 
 Evaluates a request without performing the guarded operation or consulting an approval handler. Build a request with `NiteraRequest::filesystem(...)`, `::create(...)`, `::process(...)`, or `::network(...)` and inspect what the policy would say before deciding whether to call the real operation.
 
+**This is the advisory path.** It matches paths lexically and performs no filesystem access, so it does not resolve symlinks or filesystem aliases. It can return a different decision than the guarded method for the same aliased path. A guarded method never trusts an earlier `check()` result: each authorizes its own resolved path. Use `check()` to preview a decision, not to enforce one.
+
 ### Evaluation of loaded policies
 
 `Nitera::check()` uses the internal prepared policy. Filesystem checks select the rule lists for the requested operation and test `deny`, then `ask`, then `allow`. No match, or a resource/operation/target combination that is not supported, returns `Deny`.
@@ -184,7 +186,17 @@ pub fn write(&self, path: impl AsRef<Path>, content: impl AsRef<[u8]>) -> Result
 pub fn delete(&self, path: impl AsRef<Path>) -> Result<(), NiteraOperationError>
 ```
 
-Each resolves `path` against the `Nitera`'s root via `resolve_runtime_path`, evaluates the resolved path against the matching `[filesystem]` list, and only then performs the real `std::fs` call, using that same resolved path for both the check and the actual operation.
+Each resolves `path` against the `Nitera`'s root via `resolve_runtime_path`, then resolves it to the location the operating system will actually use, evaluates that resolved location against the matching `[filesystem]` list, and only then performs the real `std::fs` call using that same resolved path. The path that was authorized is the path that is opened, so a check and a syscall cannot disagree about which resource is touched.
+
+Policy anchors are resolved to match, at load time. `PreparedPath` holds both the anchor as written and its resolved form, because a wildcard component is not a filename and cannot be canonicalized: only the literal prefix before the first wildcard is resolved, and the glob tail is left alone. This is load-time work, so a check still performs no filesystem I/O.
+
+`delete` is the exception. It resolves only the parent and keeps the final component literal, because unlinking a symlink removes the link rather than its target. Canonicalizing the final component would authorize the link's target instead of the link's own location.
+
+A path that does not exist in full cannot be canonicalized, so resolution walks its components instead. Each one is checked with `read_link`: a symlink is replaced by its target and resolution continues, a missing component ends the walk because nothing below it can be a link, and anything else is kept as written. This is what makes a **dangling final symlink** resolve to where it points. Resolving only up to the nearest existing ancestor would leave the link itself in the authorized path while the kernel followed it, which is the mismatch this design exists to prevent.
+
+An operation with no rules of any action is denied before any resolution happens, so a policy that never mentions an operation pays nothing for the check.
+
+The visible consequence is that the request an approval handler receives for a `create` now carries the resolved location rather than the caller's spelling, and `AlreadyExists` reports the resolved entry location. The handler still cannot substitute a different path: it returns only a decision about the request it was given.
 
 ### `Nitera::create`
 
@@ -209,7 +221,7 @@ pub fn execute<I, S>(&self, command: impl Into<String>, args: I, cwd: impl AsRef
 where I: IntoIterator<Item = S>, S: Into<String>
 ```
 
-Resolves `cwd` against the root, checks `[process]` (scope first, independently, then the command name against allow/ask/deny), and on success spawns via `std::process::Command`, returning its captured `Output`. `args` are passed through to the spawned process untouched, they are not part of what policy evaluates.
+Resolves `cwd` against the root and then resolves it to the location the child would actually run in, checks `[process]` (scope first, independently, then the command name against allow/ask/deny), and on success spawns via `std::process::Command` with that resolved directory, returning its captured `Output`. Resolving the working directory matters because a symlinked `cwd` inside an allowed scope would otherwise reach a denied one. `args` are passed through to the spawned process untouched, they are not part of what policy evaluates. The child also inherits the parent environment, and `Command::new` resolves the executable through the inherited `PATH`; neither is policy-controlled.
 
 ### `Nitera::connect`
 
@@ -382,6 +394,10 @@ Run unit and integration tests with `cargo test`. Unit tests in `matcher.rs`, `p
 
 ## Known limitations
 
-Nitera enforces only what goes through the `Nitera` API itself, it doesn't stop code that reaches `std::fs`, `std::process`, `std::net`, or another library directly.
+Nitra enforces only what goes through the `Nitra` API itself. It doesn't stop code that reaches `std::fs`, `std::process`, `std::net`, or another library directly.
 
-Path authorization is pattern matching on normalized paths and patterns, not OS-level sandboxing, see "A note on traversal" above for exactly what that does and doesn't protect against.
+Path authorization is pattern matching over resolved paths, not OS-level sandboxing. Resolution closes aliases that exist when the check runs, but a directory entry replaced between authorizing and opening is not defended against. That window needs descriptor-relative or capability-based access.
+
+Path components and hostnames are compared case-sensitively, while macOS and Windows filesystems are usually case-insensitive and DNS names are not. A `deny` can be stepped over by changing the case. Tracked in `SECURITY-AUDIT.md` as items 2 and 8.
+
+Resolution costs a `canonicalize` per guarded filesystem operation, which roughly doubles a small read on the measured machine. Loading also resolves every rule's literal anchor, so `Nitera::load` performs filesystem work proportional to the rule count, roughly 10 microseconds per rule, paid once at load rather than per check. See `BENCHMARKS.md`.

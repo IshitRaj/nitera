@@ -31,6 +31,43 @@ cargo bench --bench policy_check
 
 The 1, 10, and 50-rule rows sit below the index's activation threshold and are pure linear scan. The 200- and 1000-rule rows are past it and use the index. Median latency stays within a 292-375 ns band across the entire tested range, rather than growing with rule count the way the pre-index implementation did.
 
+## Guarded operations, measured separately
+
+`check()` is the advisory path: it matches paths lexically and performs no
+filesystem access. A guarded operation resolves the request path before
+authorizing it, so it costs a `canonicalize`, and the two must not be
+reported as one number.
+
+Harness: [`benches/guarded_operation.rs`](./benches/guarded_operation.rs),
+same machine and profile as the table above.
+
+| Workload | Median | p95 | p99 |
+|---|---|---|---|
+| `load`, 1,000 rules | 10.5 ms | 11.0 ms | 11.0 ms |
+| `check()`, 1,000 rules, lexical | 292 ns | 333 ns | 417 ns |
+| `canonicalize` alone | 11.3 us | 15.5 us | 17.8 us |
+| guarded `read`, end to end | 26.3 us | 31.5 us | 36.9 us |
+
+Reading these honestly:
+
+- **Load is the largest cost this change adds, and the easiest to miss.**
+  Every rule's literal anchor is resolved when the policy loads, so loading
+  is now O(rules) in filesystem calls rather than pure string work: about
+  10.5 us per rule, which is one `canonicalize` each. A 1,000-rule policy
+  costs roughly 10 ms to load, once, at startup. It is not paid per check and
+  does not grow with traffic.
+- The lexical `check()` numbers are unchanged, which is the point of keeping
+  that path filesystem-free. A check still pays no I/O.
+- Resolution roughly **doubles** a small guarded read here, from about
+  15 us to about 26 us. An earlier estimate in the original audit of 1 to
+  2 us for "one extra syscall" was wrong by about 5x: `realpath` walks every
+  path component, and these are deep temp-directory paths.
+- An operation with no rules of any action is denied before resolution, so a
+  policy that never mentions an operation pays nothing per call.
+- Rules sharing a literal anchor still each cost a resolution. Deduplicating
+  identical anchors before resolving would cut this for real policies and is
+  the obvious follow-up.
+
 ## What indexing changed
 
 | Rules in policy | Optimized scan (pre-index) | Current (scan + index) | Change |
@@ -106,3 +143,9 @@ Left: before any optimization, after the constant-factor scan optimization, and 
 - The harness covers one workload shape: a last-match filesystem read. Other rule shapes (early matches, misses, shared prefixes, exact paths, broad globs) aren't covered by the numbers above.
 - Load time and memory overhead from building the index haven't been independently re-measured on this machine; the only figures available are self-reported by the indexing PR on different hardware, so they're left out of this document rather than mixed in.
 - Single machine, single measurement session per stage. All figures are on macOS; other platforms would need their own runs.
+- `canonicalize` cost is path-depth dependent. The figures above use deep
+  temp-directory paths, which are near the pessimistic end; a shallow real
+  path would resolve faster.
+- Resolving a path and then opening it leaves a window. These numbers
+  describe cost, not race resistance, and no figure here should be read as
+  a TOCTOU guarantee.

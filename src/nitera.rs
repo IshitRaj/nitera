@@ -1,7 +1,7 @@
 use crate::approval::{ApprovalDecision, ApprovalHandler};
 use crate::engine::{CreateKind, Decision, NiteraRequest, Operation};
-use crate::policy::path::resolve_runtime_path;
-use crate::policy::prepared::PreparedPolicy;
+use crate::policy::path::{resolve_aliases, resolve_entry_location, resolve_runtime_path};
+use crate::policy::prepared::{MatchMode, PreparedPolicy};
 use crate::policy::{ParseError, parse};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -103,8 +103,57 @@ impl Nitera {
     }
 
     /// Evaluates a request against the loaded policy.
+    ///
+    /// This is the advisory path. It matches the request's path lexically,
+    /// without touching the filesystem, so it does not resolve symlinks or
+    /// filesystem aliases and cannot see through them. A caller that needs
+    /// the same decision a guarded operation would make should use the
+    /// guarded method, which authorizes the resolved location.
     pub fn check(&self, request: &NiteraRequest) -> Decision {
-        self.policy.evaluate(request, &self.root)
+        self.policy
+            .evaluate(request, &self.root, MatchMode::Lexical)
+    }
+
+    /// Resolves a request path, authorizes the resolved location, and
+    /// returns the path to hand to the operating system.
+    ///
+    /// The returned path is the one that was authorized, so the check and
+    /// the syscall cannot disagree about which resource is touched. This
+    /// closes the alias bypasses in SECURITY-AUDIT items 1 and 18: a
+    /// symlink, or a prefix such as macOS `/tmp`, inside an allowed
+    /// directory can no longer reach a denied file, because the deny is
+    /// evaluated against the resolved location and not the requested name.
+    ///
+    /// `follow_final_component` is false for operations that act on a
+    /// directory entry rather than on whatever it resolves to. Unlinking a
+    /// symlink removes the link and not its target, so `delete` resolves
+    /// only the parent and keeps the final component literal.
+    fn authorize_resolved(
+        &self,
+        operation: Operation,
+        path: &Path,
+        follow_final_component: bool,
+        build_request: impl FnOnce(PathBuf) -> NiteraRequest,
+    ) -> Result<PathBuf, NiteraOperationError> {
+        // A policy that never mentions this operation denies it, and saying
+        // so costs nothing. Resolving first would spend a `canonicalize` to
+        // reach the same answer.
+        if self.policy.filesystem_authorizes_nothing(&operation) {
+            return Err(NiteraOperationError::Denied);
+        }
+
+        let lexical = resolve_runtime_path(path, &self.root).map_err(NiteraOperationError::Io)?;
+
+        let resolved = if follow_final_component {
+            resolve_aliases(&lexical).map_err(NiteraOperationError::Io)?
+        } else {
+            resolve_entry_location(&lexical).map_err(NiteraOperationError::Io)?
+        };
+
+        // Authorize the resolved form, which is the form the syscall uses.
+        self.authorize_in_mode(&build_request(resolved.clone()), MatchMode::Resolved)?;
+
+        Ok(resolved)
     }
 
     /// Authorizes a request using the policy and, when required, the approval handler.
@@ -113,7 +162,21 @@ impl Nitera {
     /// For `Ask`, the configured approval handler is consulted. If no handler is
     /// configured, the request is returned as `NiteraOperationError::Ask`.
     fn authorize(&self, request: &NiteraRequest) -> Result<(), NiteraOperationError> {
-        match self.check(request) {
+        self.authorize_in_mode(request, MatchMode::Lexical)
+    }
+
+    /// Authorizes a request against the loaded policy in the given form.
+    ///
+    /// The `ask` handling is identical in both forms. The handler receives
+    /// the same request that was evaluated and returns only a decision, so
+    /// approving a resolved request still cannot substitute a different
+    /// path, host, or command.
+    fn authorize_in_mode(
+        &self,
+        request: &NiteraRequest,
+        mode: MatchMode,
+    ) -> Result<(), NiteraOperationError> {
+        match self.policy.evaluate(request, &self.root, mode) {
             Decision::Allow => Ok(()),
             Decision::Deny => Err(NiteraOperationError::Denied),
             Decision::Ask => match &self.approval_handler {
@@ -127,34 +190,46 @@ impl Nitera {
     }
 
     /// Reads a file after policy authorization.
+    ///
+    /// The path is resolved to the location the operating system will use
+    /// and that resolved location is what gets authorized and read, so a
+    /// symlinked or aliased path cannot reach a denied file.
     pub fn read(&self, path: impl AsRef<std::path::Path>) -> Result<Vec<u8>, NiteraOperationError> {
-        let request_path =
-            resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
-        let request = NiteraRequest::filesystem(Operation::Read, request_path.clone());
-        self.authorize(&request)?;
-        std::fs::read(&request_path).map_err(NiteraOperationError::Io)
+        let resolved =
+            self.authorize_resolved(Operation::Read, path.as_ref(), true, |resolved| {
+                NiteraRequest::filesystem(Operation::Read, resolved)
+            })?;
+        std::fs::read(&resolved).map_err(NiteraOperationError::Io)
     }
 
     /// Writes a file after policy authorization.
+    ///
+    /// The resolved location is authorized and written, so a symlinked or
+    /// aliased path cannot write through to a denied file. A path that does
+    /// not exist yet resolves through its deepest existing ancestor.
     pub fn write(
         &self,
         path: impl AsRef<std::path::Path>,
         content: impl AsRef<[u8]>,
     ) -> Result<(), NiteraOperationError> {
-        let request_path =
-            resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
-        let request = NiteraRequest::filesystem(Operation::Write, request_path.clone());
-        self.authorize(&request)?;
-        std::fs::write(&request_path, content).map_err(NiteraOperationError::Io)
+        let resolved =
+            self.authorize_resolved(Operation::Write, path.as_ref(), true, |resolved| {
+                NiteraRequest::filesystem(Operation::Write, resolved)
+            })?;
+        std::fs::write(&resolved, content).map_err(NiteraOperationError::Io)
     }
 
     /// Deletes a file after policy authorization.
+    ///
+    /// Only the parent is resolved. Unlinking a symlink removes the link
+    /// rather than its target, so the final component is kept literal and
+    /// the link's own location is what gets authorized.
     pub fn delete(&self, path: impl AsRef<std::path::Path>) -> Result<(), NiteraOperationError> {
-        let request_path =
-            resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
-        let request = NiteraRequest::filesystem(Operation::Delete, request_path.clone());
-        self.authorize(&request)?;
-        std::fs::remove_file(&request_path).map_err(NiteraOperationError::Io)
+        let resolved =
+            self.authorize_resolved(Operation::Delete, path.as_ref(), false, |resolved| {
+                NiteraRequest::filesystem(Operation::Delete, resolved)
+            })?;
+        std::fs::remove_file(&resolved).map_err(NiteraOperationError::Io)
     }
 
     /// Creates a new file at `path` with `content`.
@@ -186,10 +261,14 @@ impl Nitera {
         kind: CreateKind,
         content: Option<&[u8]>,
     ) -> Result<(), NiteraOperationError> {
+        // `create` never overwrites and `create_dir` makes exactly one
+        // level, so the target is a new entry. Resolving the entry location
+        // keeps the final component literal while still authorizing the real
+        // parent directory, which is the resource the operation touches.
         let request_path =
-            resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
-        let request = NiteraRequest::create(request_path.clone(), kind);
-        self.authorize(&request)?;
+            self.authorize_resolved(Operation::Create, path.as_ref(), false, |resolved| {
+                NiteraRequest::create(resolved, kind)
+            })?;
 
         let result = match content {
             Some(bytes) => std::fs::OpenOptions::new()
@@ -224,8 +303,14 @@ impl Nitera {
         let args: Vec<String> = args.into_iter().map(Into::into).collect();
         let request_cwd =
             resolve_runtime_path(cwd.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
+        // A working directory is a location a child process actually runs
+        // in, so it is authorized resolved rather than lexically. A
+        // symlinked cwd inside an allowed scope must not reach a denied one.
+        let request_cwd = resolve_aliases(&request_cwd).map_err(NiteraOperationError::Io)?;
         let request = NiteraRequest::process(&command, args.clone(), request_cwd.clone());
-        self.authorize(&request)?;
+        // Authorize the resolved working directory, which is the directory
+        // the child will actually run in.
+        self.authorize_in_mode(&request, MatchMode::Resolved)?;
         std::process::Command::new(&command)
             .args(&args)
             .current_dir(&request_cwd)
