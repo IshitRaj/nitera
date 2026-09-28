@@ -100,15 +100,12 @@ fn normalize_components<'a>(
             }
 
             Component::RootDir => {
-                // The separator is only pushed when nothing is buffered yet.
-                //
-                // On Unix the root is always the first component, so this
-                // always pushes and gives "/a/b". On Windows the root can
-                // follow a prefix: pushing a rooted path onto "C:" replaces
-                // everything after the drive and discards it, turning a
-                // drive-qualified path into "/Users/...", and the drive has to
-                // survive. Once "C:" is buffered the separator is already
-                // implied, and pushing another path adds its own.
+                // Only pushed when nothing is buffered yet. On Unix the root is
+                // always the first component, so this always pushes and gives
+                // "/a/b". On Windows the root can follow a prefix, which the
+                // arm below already pushed along with its separator; pushing
+                // another rooted path there would replace everything after the
+                // drive and discard it.
                 if normalized.as_os_str().is_empty() {
                     normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR));
                 }
@@ -119,7 +116,22 @@ fn normalize_components<'a>(
             }
 
             Component::Prefix(prefix) => {
-                normalized.push(prefix.as_os_str()); // Windows drive letters, e.g. "C:"
+                // The prefix is pushed together with a trailing separator.
+                //
+                // `PathBuf::push` treats a buffer ending in a drive prefix as
+                // already delimited, so pushing `a` onto `D:` gives `D:a` and
+                // not `D:\a`, and the result no longer compares equal to a
+                // policy that spelled it the ordinary way. The separator also
+                // makes the root implied for the `RootDir` component that
+                // follows, so the root arm above has nothing left to push.
+                //
+                // This also normalizes the drive-relative `C:foo` to `C:\foo`.
+                // That is a deliberate change: `normalize_pattern` already
+                // rewrites a pattern spelled `C:foo` to the rooted form, so the
+                // two sides now agree instead of silently never matching.
+                let mut anchored = prefix.as_os_str().to_os_string();
+                anchored.push(std::path::MAIN_SEPARATOR_STR);
+                normalized.push(Path::new(&anchored));
             }
         }
     }
@@ -937,6 +949,13 @@ mod tests {
         let text = to_policy_string(&resolved);
         let base = to_policy_string(dir);
 
+        // The drive must be followed by a separator. Pushing the prefix and its
+        // root as one unit is what produces this; pushing the prefix alone
+        // yields `C:a`, and pushing the root separately discards the drive.
+        assert!(
+            text.as_bytes().get(1) == Some(&b':') && text.as_bytes().get(2) == Some(&b'/'),
+            "expected a `C:/` anchor, got {text:?}"
+        );
         assert!(
             text.starts_with(&base),
             "the drive and root must survive: expected a prefix of {base:?}, got {text:?}"
