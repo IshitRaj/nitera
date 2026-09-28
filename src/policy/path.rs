@@ -693,10 +693,22 @@ mod tests {
         std::fs::create_dir_all(dir.join("a/b")).unwrap();
 
         // Neither `c` nor `d/e` exists yet, as for create or a new write.
-        // `canonicalize` would fail on the whole path, so the expectation
-        // is the resolved root plus the untouched tail.
+        // `canonicalize` would fail on the whole path, so the expectation is
+        // the resolved existing ancestor plus the untouched tail.
+        //
+        // The ancestor is taken from the walk itself, via a probe with a
+        // missing tail, so it is spelled exactly as the walk spells it. Using
+        // `dir.canonicalize()` instead would compare against the extended
+        // `\\?\` form and an expanded 8.3 short name on Windows, and against a
+        // `/var` already rewritten to `/private/var` on Unix, so the assertion
+        // would test a difference in spelling rather than in resolution.
         let resolved = resolve_aliases(&dir.join("a/b/c/d/e")).unwrap();
-        assert_eq!(resolved, dir.canonicalize().unwrap().join("a/b/c/d/e"));
+        let probe = to_policy_string(&resolve_aliases(&dir.join("missing-probe")).unwrap());
+        let existing = probe
+            .strip_suffix("/missing-probe")
+            .expect("the walk must preserve a missing tail");
+
+        assert_eq!(to_policy_string(&resolved), format!("{existing}/a/b/c/d/e"));
     }
 
     #[test]
@@ -902,11 +914,21 @@ mod tests {
     /// be kept as an ordinary name.
     ///
     /// Walking through a regular file asks `read_link` about a path whose
-    /// parent is not a directory. That is an inspection failure, not an
-    /// answer of "not a symlink", and the old code treated it as the latter,
-    /// leaving an unresolvable name in the path that was about to be
-    /// authorized.
+    /// parent is not a directory. On Unix that is `ENOTDIR`, an inspection
+    /// failure rather than an answer of "not a symlink", and the old code
+    /// treated it as the latter, leaving an unresolvable name in the path that
+    /// was about to be authorized.
+    ///
+    /// Unix only. Windows reports a path under a regular file as *not found*
+    /// rather than as a bad parent, so it takes the missing-component branch
+    /// and keeps the tail. That is safe, because such a path cannot be opened
+    /// at all, and the branch is covered there by
+    /// `resolves_the_deepest_existing_ancestor_and_keeps_the_tail`. What
+    /// actually differs by platform, the `read_link` error classification, is
+    /// pinned for both platforms by
+    /// `only_a_definite_not_a_symlink_is_treated_as_one`.
     #[test]
+    #[cfg(unix)]
     fn uninspectable_component_fails_resolution() {
         let scratch = Scratch::new("uninspectable");
         let dir = scratch.path();
@@ -920,9 +942,12 @@ mod tests {
         );
     }
 
-    /// The same guard for a symlink that cannot be resolved because a
-    /// component above it is not a directory.
+    /// The same guard one level deeper, for a path under a regular file.
+    ///
+    /// Unix only, for the reason given on
+    /// [`uninspectable_component_fails_resolution`].
     #[test]
+    #[cfg(unix)]
     fn symlink_under_a_non_directory_is_not_treated_as_a_name() {
         let scratch = Scratch::new("uninspectable-link");
         let dir = scratch.path();
