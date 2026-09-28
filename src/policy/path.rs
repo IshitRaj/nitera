@@ -525,29 +525,76 @@ mod tests {
         assert_eq!(result, PathBuf::from("/etc/passwd"));
     }
 
+    /// Sets `HOME` for the duration of a test on a platform that does not
+    /// provide one, and restores the previous value on drop.
+    ///
+    /// Windows does not set `HOME`, so a test that reads it directly would
+    /// panic there even though the library itself only needs it for a
+    /// home-relative path. Restoring on drop keeps one test from leaking the
+    /// value into another in the same process.
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        /// Returns the effective `HOME`, having set a temporary one if the
+        /// platform does not provide it.
+        fn ensure() -> (std::ffi::OsString, Self) {
+            let existing = std::env::var_os("HOME");
+            let value = existing.clone().unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("nitera-home-fixture")
+                    .into_os_string()
+            });
+            // SAFETY: single-threaded within this test, and restored on drop.
+            unsafe { std::env::set_var("HOME", &value) };
+
+            (value, Self(existing))
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: as above.
+            unsafe {
+                match &self.0 {
+                    Some(previous) => std::env::set_var("HOME", previous),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn expands_home() {
-        let result = expand_home("~/projects/file.txt").unwrap();
-        let home = std::env::var("HOME").unwrap();
+        let (home, _guard) = HomeGuard::ensure();
 
-        assert_eq!(result, PathBuf::from(home).join("projects/file.txt"));
+        let result = expand_home("~/projects/file.txt").unwrap();
+
+        assert_eq!(result, PathBuf::from(&home).join("projects/file.txt"));
     }
 
     #[test]
     fn relative_path_uses_base() {
-        let result = resolve_runtime_path("./playground/test.txt", "/home/user/project").unwrap();
+        // The base must be absolute on the running platform. A `/`-rooted base
+        // is drive-relative on Windows, so the input would be joined onto it
+        // and the assertion would be testing something else.
+        let base = std::env::temp_dir().join("nitera-path-fixture/project");
+        let result = resolve_runtime_path("./playground/test.txt", &base).unwrap();
 
         assert_eq!(
-            result,
-            PathBuf::from("/home/user/project/playground/test.txt")
+            to_policy_string(&result),
+            to_policy_string(&base.join("playground/test.txt"))
         );
     }
 
     #[test]
     fn absolute_path_ignores_base() {
-        let result = resolve_runtime_path("/playground/test.txt", "/home/user/project").unwrap();
+        // Built from the current directory so it is genuinely absolute. On
+        // Windows a literal `/playground/test.txt` is not absolute, so it gets
+        // joined onto the base and the assertion would be inverted.
+        let absolute = std::env::current_dir().unwrap().join("playground/test.txt");
+        let result = resolve_runtime_path(&absolute, "/some/other/base").unwrap();
 
-        assert_eq!(result, PathBuf::from("/playground/test.txt"));
+        assert_eq!(to_policy_string(&result), to_policy_string(&absolute));
     }
 
     #[test]
@@ -678,12 +725,12 @@ mod tests {
 
     #[test]
     fn resolution_of_a_bare_filename_uses_the_current_directory() {
-        let expected = std::env::current_dir()
-            .unwrap()
-            .canonicalize()
-            .unwrap()
-            .join("leaf");
-        assert_eq!(resolve_aliases(Path::new("leaf")).unwrap(), expected);
+        // Compared in policy form, because `canonicalize` can add an extended
+        // `\\?\` prefix on Windows that the resolver does not produce.
+        let expected = std::env::current_dir().unwrap().join("leaf");
+        let resolved = resolve_aliases(Path::new("leaf")).unwrap();
+
+        assert_eq!(to_policy_string(&resolved), to_policy_string(&expected));
     }
 
     // ------------------------------------------------------------------
@@ -812,14 +859,18 @@ mod tests {
         // passing a relative path means.
         let relative = Path::new("a").join("missing").join("leaf.txt");
         let resolved = resolve_aliases(&relative).unwrap();
-        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let cwd = std::env::current_dir().unwrap();
 
         assert!(
             resolved.is_absolute(),
             "a relative request must still resolve to an absolute path, got {resolved:?}"
         );
-        assert_eq!(resolved, cwd.join("a/missing/leaf.txt"));
-        assert!(!dir.join("a").exists() || resolved.starts_with(&cwd));
+        // Policy form, because `canonicalize` can add an extended `\\?\` prefix
+        // on Windows that the resolver does not produce.
+        assert_eq!(
+            to_policy_string(&resolved),
+            to_policy_string(&cwd.join("a/missing/leaf.txt"))
+        );
     }
 
     /// A component that cannot be inspected must fail resolution rather than
