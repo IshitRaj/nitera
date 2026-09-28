@@ -1,18 +1,23 @@
-# Security and hardening audit, 1.0.0
+# Security and hardening audit
 
-**Status: items 6, 12, and 16 are fixed on `main` and will ship in the next
-release. Item 19 is fixed in the repository only, because `examples/` is
-not part of the published package. Items 1, 2, and 18 remain confirmed
+**Status: items 6, 12, and 16 are fixed and shipped in 1.0.1, the first
+published version to contain them. Item 19 is fixed in the repository only,
+because `examples/` is not part of the published package, so no release
+carries it. Items 1, 2, 3, and 18 are open, and 1, 2, and 18 are confirmed
 policy bypasses. Item 18 is another instance of unresolved filesystem
-aliases, not an independent vulnerability class.
+aliases, not an independent vulnerability class.**
+
+The path-authorization work for items 1 and 18 was prototyped but is not on
+`main` and is not in any published version. 1.0.1 contains only the two
+parser and loading corrections and the `Debug` impl. Anyone who needs the
+symlink and alias bypasses closed must not assume a published release does so.
 
 This document records findings and a corrected remediation plan. Updating
 the document does not fix the implementation. The original audit targeted
 the 1.0.0 source at `d730383`; commit `a09590a`, merged through PR #3,
-fixed the three items above. The fixed status refers to source on `main`,
-not the published 1.0.0 crate. Each implementation PR must update its own
-status and link its regression coverage; a release must record the first
-published version containing the fix.
+fixed items 6, 12, and 16, and release 1.0.1 published them. Each
+implementation PR must update its own status and link its regression coverage;
+a release must record the first published version containing the fix.
 
 ## Evidence and limits
 
@@ -27,9 +32,14 @@ connections were needed. Those probes were outside the repository; each
 fix needs committed regression tests rather than relying on this record.
 
 The current source includes the three fixes and the test-fixture cleanup
-from PR #5. The source changes since the independently tested audit commit
-do not change the path bypasses. Windows behavior is supported by code
-inspection only; it has not been runtime-verified in this review.
+from PR #5, and 1.0.1 publishes the three fixes. The source changes since
+the independently tested audit commit do not change the path bypasses.
+Windows behavior is still supported by code inspection only; it has not been
+runtime-verified in this review. A Windows CI job was prototyped while
+attempting item 3, and it exposed that the policy grammar and the resolver
+were not portable, but that work was not landed and no Windows job runs on
+`main`. Item 3 is therefore still open, and its required checks remain
+unmet.
 
 The 375 ns median at 1,000 rules in `BENCHMARKS.md` is a historical M2
 release-build measurement of the existing `check()` workload. It is not a
@@ -69,17 +79,17 @@ Numbering matches the detailed findings and sequencing table.
 | 3 | Windows path representation and HOME assumptions | correctness | source inspection; Windows execution required | open |
 | 4 | Commas cannot be represented literally in values | grammar limitation | parser output verified | open |
 | 5 | Hashes start comments even inside intended paths | grammar limitation | parser output verified | open |
-| 6 | Repeated whitespace between action and kind breaks parsing | correctness | original error reproduced; regression tests added | fixed, unreleased (#3) |
+| 6 | Repeated whitespace between action and kind breaks parsing | correctness | original error reproduced; regression tests added | fixed, shipped in 1.0.1 (#3) |
 | 7 | Process arguments are not evaluated | model gap | policy decisions verified | open |
 | 8 | Network ports are not evaluated | model gap | decisions for several ports verified | open |
 | 9 | Child environment and executable lookup are inherited | model gap | synthetic environment inheritance verified; lookup inspected | open |
 | 10 | Filesystem operation coverage is incomplete | model gap | public API inspected | open |
 | 11 | create_dir creates only one level | feature limitation | missing-parent error verified | open |
-| 12 | Bare .nitera filename rejected by load | correctness | original error reproduced; regression test added | fixed, unreleased (#3) |
+| 12 | Bare .nitera filename rejected by load | correctness | original error reproduced; regression test added | fixed, shipped in 1.0.1 (#3) |
 | 13 | HOME required for ordinary filesystem/process paths | robustness | isolated missing-HOME probe | open |
 | 14 | Denied error does not carry the request | auditability | error representation inspected | open |
 | 15 | Public types have compatibility constraints on extension | API evolution | type definitions inspected | open |
-| 16 | Nitera lacks Debug in 1.0.0 | ergonomics | implementation and regression test reviewed | fixed, unreleased (#3) |
+| 16 | Nitera lacks Debug in 1.0.0 | ergonomics | implementation and regression test reviewed | fixed, shipped in 1.0.1 (#3) |
 | 17 | Normalization errors become nonmatching patterns | latent hardening concern | missing-HOME scenario fails closed | open; no demonstrated bypass |
 | 18 | /tmp versus /private/tmp alias can bypass a deny | security, related to #1 | protected synthetic payload returned | open |
 | 19 | Example host allow is overridden by deny host * | documentation | resulting Deny verified | fixed, repository only |
@@ -230,7 +240,7 @@ resulting deny/ask/allow decisions, not just successful parsing.
 Parsing costs occur at load time; benchmark unusually large policies if
 needed. Existing checks need not gain extra parsing work.
 
-### 6. Whitespace between action and kind — fixed, unreleased
+### 6. Whitespace between action and kind, fixed and shipped in 1.0.1
 
 The 1.0.0 `splitn(3, char::is_whitespace)` parser rejects `allow  read ./a`
 because it produces an empty kind. This fails parsing; unlike items 4 and
@@ -242,8 +252,8 @@ Do not substitute `split_whitespace().take(3)`: it loses `./b` and `./c`
 from `deny read ./a, ./b, ./c`, potentially weakening the deny.
 
 **Coverage to preserve.** Repeated spaces, mixed tabs/spaces, missing kind,
-and comma-separated values with spaces. Track the first released version;
-no replacement implementation is needed.
+and comma-separated values with spaces. The first released version carrying
+this fix is 1.0.1; no replacement implementation was needed.
 
 ## Model and API extensions
 
@@ -359,14 +369,16 @@ failure after one directory was created. Work scales with depth.
 
 ## Robustness and compatibility
 
-### 12. Dotfile policy loading — fixed, unreleased
+### 12. Dotfile policy loading, fixed and shipped in 1.0.1
 
 In 1.0.0, the extension guard rejects `.nitera` because a leading dot does
 not constitute a file extension. Commit `a09590a` accepts either the exact
 filename `.nitera` or an extension of `nitera`, retaining rejection of
 `.nitera.bak` and unrelated extensions. Preserve that implementation and
-its tests; record the first release containing it. The original README
-example failed at this loading step, regardless of its other prerequisites.
+its tests. The first release containing it is 1.0.1, verified by loading
+`nitera@1.0.1` from the registry and reading a dotfile policy. The original
+README example failed at this loading step, regardless of its other
+prerequisites.
 
 ### 13. HOME required without tilde expansion
 
@@ -430,12 +442,14 @@ label a breaking release safe because adoption is small.
 and migration, alongside release notes. This attribute itself does not add
 runtime matching work.
 
-### 16. Debug — fixed, unreleased; Clone is separate
+### 16. Debug, fixed and shipped in 1.0.1; Clone is separate
 
 Commit `a09590a` adds a manual Debug implementation that exposes the policy
 root and handler-registration state without formatting the handler or
 prepared policy. Preserve it and the regression coverage. PR #5 also
-cleans up both temporary policy files used by the test.
+cleans up both temporary policy files used by the test. 1.0.1 is the first
+release carrying it, verified by formatting a loaded policy from the
+registry copy of the crate.
 
 `Arc<dyn ApprovalHandler>` does not inherently prevent Clone: cloning an
 Arc shares the allocation without requiring the handler to implement
@@ -514,8 +528,9 @@ decisions through `Nitera::check` and opens no socket. Verified failing
 against the old policy (`left: Deny, right: Allow`) and passing after.
 
 `examples/` is excluded by the `include` list in `Cargo.toml`, so this fix
-is not carried by any published version and has no `CHANGELOG.md` entry.
-It affects anyone reading or running the repository only.
+is not carried by any published version, 1.0.1 included, and has no
+`CHANGELOG.md` entry. It affects anyone reading or running the repository
+only.
 
 Two other `deny host *` occurrences were inspected and deliberately left
 alone. `connect_deny_overrides_allow` in `tests/nitersa.rs` uses the dead
@@ -541,8 +556,8 @@ across changes that temporarily allow requests the policy should deny.
 
 | Order | Items | Deliverable and acceptance gate |
 |---|---|---|
-| Already merged | 6, 12, 16 | Preserve fixes from #3 and test cleanup from #5; track release status. |
-| Landed early | 19 | Example policy corrected independently of the path work; repository only, no release carries it. |
+| Merged and released | 6, 12, 16 | Fixes from #3 and test cleanup from #5, first published in 1.0.1. Preserve; no replacement implementation needed. |
+| Landed early | 19 | Example policy corrected independently of the path work; repository only, no release carries it, 1.0.1 included. |
 | 1 | 1, 2, 3, 18 | Commit isolated bypass regressions and a platform/path semantics contract; distinguish static-alias mitigation from race resistance. |
 | 2 | 1, 18 | Implement shared, operation-aware resolved authorization; pass symlink, alias, creation, deletion, and cwd checks; benchmark guarded operations. |
 | 3 | 2, 3 | Enforce supported filesystem name equivalence through both matchers and candidate indexes; reject unsupported enforcement modes; run platform tests. |
