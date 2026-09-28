@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-28
+
 ### Fixed
 
 - `Nitera::load(".nitera")` now works. The extension check rejected a file named exactly `.nitera`, because `Path::extension` reports no extension for a dotfile, which made the documented quick start fail with `InvalidPolicyFile`. A path is now accepted if its extension is `nitera` or its file name is exactly `.nitera`.
@@ -15,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `Nitera` implements `Debug`, so it can be logged or embedded in a struct that derives it. The output shows the policy root and whether an approval handler is registered, and does not reach into the prepared policy or the handler.
+
+### Not in this release
+
+- The resolved-path authorization work is not released yet. Audit items 1 and 18, where a request path and its policy anchor could name the same file through different symlink resolutions, are still unfixed in the published crate. Items 2 and 8, where a case-folded filesystem or hostname can defeat a `deny`, are also still open. See the repository's `SECURITY-AUDIT.md` for the current status.
 
 ## [1.0.0] - 2026-09-26
 

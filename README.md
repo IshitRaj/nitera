@@ -39,7 +39,7 @@ or add it directly to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nitera = "1.0.0"
+nitera = "1.0.1"
 ```
 
 ## Quick start
