@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `Nitera` implements `Debug`, so it can be logged or embedded in a struct that derives it. The output shows the policy root and whether an approval handler is registered, and does not reach into the prepared policy or the handler.
 - `benches/guarded_operation.rs`, which measures policy load time, `check()`, path resolution, and a full guarded read separately. See `BENCHMARKS.md`.
+- CI now runs on `windows-latest` as well as `ubuntu-latest`, and both run formatting and clippy checks. Windows compiles, formats and lints cleanly; path-matching tests fail there, which is tracked as `SECURITY-AUDIT.md` item 3 and does not block other pull requests.
 - Loading a policy now resolves each rule's literal anchor, so `Nitera::load` performs filesystem work proportional to the rule count, about 10 microseconds per rule, or roughly 10 ms for a 1,000-rule policy. This is paid once when the policy is loaded. A check still performs no filesystem I/O.
 
 ## [1.0.0] - 2026-09-26

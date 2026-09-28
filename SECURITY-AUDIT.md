@@ -67,7 +67,7 @@ Numbering matches the detailed findings and sequencing table.
 |---|---|---|---|---|
 | 1 | Symlink traversal bypasses narrow allows and explicit denies | security | protected synthetic payload returned | fixed, unreleased |
 | 2 | Case-insensitive filesystem names bypass case-sensitive denies | security | protected synthetic payload returned on macOS | open, next |
-| 3 | Windows path representation and HOME assumptions | correctness | source inspection; Windows execution required | open |
+| 3 | Windows path representation and HOME assumptions | correctness | Windows CI now runs: 21 pre-existing tests fail | open |
 | 4 | Commas cannot be represented literally in values | grammar limitation | parser output verified | open |
 | 5 | Hashes start comments even inside intended paths | grammar limitation | parser output verified | open |
 | 6 | Repeated whitespace between action and kind breaks parsing | correctness | original error reproduced; regression tests added | fixed, unreleased (#3) |
@@ -264,8 +264,19 @@ wrong.
 `normalize_pattern` splits on `/` and constructs a leading `/`, whereas
 Windows paths can contain backslashes, drive/UNC prefixes, and extended
 path syntax. Request and pattern representations can consequently differ.
-The unconditional HOME requirement is another obstacle. These findings are
-from source inspection; Windows support needs execution on a Windows host.
+The unconditional HOME requirement is another obstacle.
+
+**Status: open, now with execution evidence.** A `windows-latest` CI job runs
+build, tests, fmt and clippy. The library and every test target compile, fmt is
+clean, and clippy is clean. **21 pre-existing tests fail**, all of them
+`policy::matcher` and `policy::path` tests that predate this work and use
+POSIX paths such as `/home/user/project/file.txt`. A pattern normalizes to a
+leading `/` while a Windows path renders with `\`, so the two never compare
+equal. This confirms the finding by running it rather than by inspection.
+
+The CI job is marked `continue-on-error` so this known-open item does not
+block unrelated pull requests. It reports the failure and will turn green on
+its own when item 3 is fixed; the flag should be removed then.
 
 **Corrected approach.** Define a platform-aware internal path representation
 used by both patterns and requests. Preserve drive and UNC identity;
