@@ -89,7 +89,11 @@ fn normalize_components<'a>(
             }
 
             Component::RootDir => {
-                normalized.push(Path::new("/"));
+                // Pushing the platform root rather than a literal "/", because
+                // on Windows a rooted path with no drive *replaces* everything
+                // after the drive. Pushing "/" onto "C:" would discard the
+                // drive and turn a drive-qualified path into "/Users/...".
+                normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR));
             }
 
             Component::Normal(part) => {
