@@ -641,7 +641,15 @@ mod tests {
             for path in &paths {
                 let resolved = super::super::path::resolve_runtime_path(path, base).unwrap();
                 assert_eq!(
-                    prepared.matches(&resolved.to_string_lossy(), MatchMode::Lexical),
+                    // `PreparedPath` holds the `/` policy form, which is what
+                    // `evaluate` hands it. Comparing the raw `to_string_lossy`
+                    // rendering instead would pass a `\`-separated path on
+                    // Windows and never match, for a reason that has nothing to
+                    // do with what this test checks.
+                    prepared.matches(
+                        &super::super::path::to_policy_string(&resolved),
+                        MatchMode::Lexical
+                    ),
                     original.matches_from(Path::new(path), base),
                     "pattern={:?}, path={path:?}",
                     original.0

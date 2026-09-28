@@ -20,12 +20,23 @@ pub fn to_policy_string(path: &Path) -> String {
 /// Whether a `read_link` failure means "this component is present and is not
 /// a symlink", as opposed to "the component could not be inspected".
 ///
-/// Unix reports `EINVAL` for a non-symlink and Windows reports
-/// `ERROR_NOT_A_REPARSE_POINT`, which surfaces as `InvalidInput`. Every
-/// other kind is an inspection failure and must not be read as a negative
-/// answer, because that would silently keep an unresolvable path.
+/// Unix reports `EINVAL` for a non-symlink, which Rust maps to `InvalidInput`.
+/// Windows reports `ERROR_NOT_A_REPARSE_POINT` and maps *no* `ErrorKind` to it,
+/// so it arrives as `Uncategorized` with the raw code still readable. Every
+/// other outcome is an inspection failure and must not be read as a negative
+/// answer, because that would leave an unresolvable name in the path that is
+/// about to be authorized.
 fn is_not_a_symlink(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::InvalidInput
+    if error.kind() == std::io::ErrorKind::InvalidInput {
+        return true;
+    }
+
+    /// `ERROR_NOT_A_REPARSE_POINT`. A fixed value from the Windows SDK, which
+    /// Rust surfaces as an uncategorized error rather than a kind, so it has to
+    /// be matched on the raw code. Unix errnos are all small and never collide.
+    const ERROR_NOT_A_REPARSE_POINT: i32 = 4390;
+
+    error.raw_os_error() == Some(ERROR_NOT_A_REPARSE_POINT)
 }
 
 /// Strips a leading `~` plus either separator, so a home-relative path is
@@ -856,6 +867,35 @@ mod tests {
             to_policy_string(&resolved),
             to_policy_string(&cwd.join("a/missing/leaf.txt"))
         );
+    }
+
+    /// The `read_link` classifier decides whether resolution continues or
+    /// fails, so it is pinned directly rather than only through a path walk.
+    ///
+    /// The Windows code is the part worth this test: it is only reachable on
+    /// Windows in practice, and getting it wrong turns every ordinary directory
+    /// into a hard resolution failure.
+    #[test]
+    fn only_a_definite_not_a_symlink_is_treated_as_one() {
+        // Unix reports EINVAL for a non-symlink.
+        assert!(is_not_a_symlink(&std::io::Error::from(
+            std::io::ErrorKind::InvalidInput
+        )));
+        // Windows reports ERROR_NOT_A_REPARSE_POINT with no `ErrorKind`.
+        assert!(is_not_a_symlink(&std::io::Error::from_raw_os_error(4390)));
+
+        // Anything meaning "could not inspect" must not read as a negative
+        // answer, or the operation would be authorized on an unverified path.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotADirectory,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                !is_not_a_symlink(&std::io::Error::from(kind)),
+                "{kind:?} must not be read as 'not a symlink'"
+            );
+        }
     }
 
     /// A component that cannot be inspected must fail resolution rather than
