@@ -165,70 +165,100 @@ fn resolve_components(path: &Path) -> std::io::Result<PathBuf> {
     // a single path resolution is a reasonable bound to adopt.
     const MAX_SYMLINKS: usize = 40;
 
-    // The queue is consumed from the front, so it is filled front to back.
-    let mut queue: Vec<std::ffi::OsString> = Vec::new();
-    for component in path.components() {
+    // Steps are kept as kinds rather than plain strings so that the root and
+    // Windows prefix markers are never mistaken for ordinary names. They are
+    // handed to `PathBuf::push`, which applies the platform's own joining
+    // rules for them.
+    #[derive(Clone)]
+    enum Step {
+        RootOrPrefix(OsString),
+        Parent,
+        Normal(OsString),
+    }
+
+    fn step_of(component: Component<'_>) -> Option<Step> {
         match component {
-            // A leading `.` carries no meaning. `..` is kept and applied to
-            // the prefix built so far, so a link target that walks back out
-            // behaves the way the kernel handles it.
-            Component::CurDir => {}
-            _ => queue.push(component.as_os_str().to_os_string()),
+            // A leading `.` carries no meaning and is dropped.
+            Component::CurDir => None,
+            Component::RootDir | Component::Prefix(_) => {
+                Some(Step::RootOrPrefix(component.as_os_str().to_os_string()))
+            }
+            Component::ParentDir => Some(Step::Parent),
+            Component::Normal(name) => Some(Step::Normal(name.to_os_string())),
         }
     }
 
-    let mut resolved = PathBuf::new();
+    // The queue is consumed from the front, so it is filled front to back.
+    let mut queue: Vec<Step> = path.components().filter_map(step_of).collect();
+
+    // A relative path is resolved against the current directory up front, so
+    // the result is always absolute. Otherwise the value authorized here and
+    // the path handed to the syscall could be interpreted against a different
+    // working directory, which is the mismatch this whole design avoids.
+    let mut resolved = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir()?
+    };
+
     let mut followed = 0usize;
+    // Once a component is missing, nothing below it can be a symlink, so the
+    // rest is kept as written. The flag is not cleared on `..`: a tail that
+    // walks back up is not re-examined, which is the conservative direction.
+    let mut past_missing = false;
 
-    while let Some(part) = queue.first().cloned() {
-        queue.remove(0);
+    while !queue.is_empty() {
+        let step = queue.remove(0);
 
-        if part == OsStr::new("..") {
-            resolved.pop();
-            continue;
-        }
-        if part == OsStr::new(".") {
-            continue;
-        }
-        // Root and Windows prefixes are absolute markers, pushed as-is.
-        if part == OsStr::new("/") {
-            resolved = PathBuf::from("/");
-            continue;
-        }
-
-        let candidate = resolved.join(&part);
-
-        match std::fs::read_link(&candidate) {
-            // A symlink. Replace it with its target and keep going.
-            Ok(target) => {
-                followed += 1;
-                if followed > MAX_SYMLINKS {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "too many levels of symbolic links",
-                    ));
+        match step {
+            Step::RootOrPrefix(marker) => resolved.push(marker),
+            Step::Parent => {
+                resolved.pop();
+            }
+            Step::Normal(name) => {
+                if past_missing {
+                    resolved.push(name);
+                    continue;
                 }
-                if target.is_absolute() {
-                    resolved = PathBuf::from("/");
-                }
-                for component in target.components().rev() {
-                    queue.insert(0, component.as_os_str().to_os_string());
+
+                let candidate = resolved.join(&name);
+                match std::fs::read_link(&candidate) {
+                    // A symlink. Replace it with its target and keep going,
+                    // which is what makes a dangling link resolve to where it
+                    // points rather than staying as the link itself.
+                    Ok(target) => {
+                        followed += 1;
+                        if followed > MAX_SYMLINKS {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "too many levels of symbolic links",
+                            ));
+                        }
+                        // An absolute target restarts from the root. Starting
+                        // from an empty path and letting the target's own
+                        // root and prefix components build it keeps Windows
+                        // drive and UNC identity intact.
+                        if target.is_absolute() {
+                            resolved = PathBuf::new();
+                        }
+                        let spliced: Vec<Step> = target.components().filter_map(step_of).collect();
+                        // Forward order: the splice already places these
+                        // ahead of whatever is left, so reversing them here
+                        // would walk the target backwards.
+                        queue.splice(0..0, spliced);
+                    }
+                    // Missing entirely: nothing below here can resolve.
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && std::fs::symlink_metadata(&candidate).is_err() =>
+                    {
+                        resolved.push(name);
+                        past_missing = true;
+                    }
+                    // Exists and is not a symlink. Keep it.
+                    Err(_) => resolved.push(name),
                 }
             }
-            // Missing, and not a dangling symlink we should follow: nothing
-            // below here can resolve, so keep the rest as written.
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && std::fs::symlink_metadata(&candidate).is_err() =>
-            {
-                resolved.push(&part);
-                for rest in queue {
-                    resolved.push(rest);
-                }
-                return Ok(resolved);
-            }
-            // Exists and is not a symlink. Keep it.
-            Err(_) => resolved.push(&part),
         }
     }
 
@@ -576,6 +606,142 @@ mod tests {
             .unwrap()
             .join("leaf");
         assert_eq!(resolve_aliases(Path::new("leaf")).unwrap(), expected);
+    }
+
+    // ------------------------------------------------------------------
+    // Dangling symlink resolution. A symlink whose target does not exist
+    // cannot be canonicalized at all, so these exercise the component walk.
+    // Authorization must land on the real destination; falling back to the
+    // link path would let the check and the syscall disagree.
+    // ------------------------------------------------------------------
+
+    /// A symlink pointing at a target that does not exist yet, used as the
+    /// final component.
+    #[test]
+    #[cfg(unix)]
+    fn dangling_final_symlink_resolves_to_its_destination() {
+        let scratch = Scratch::new("dangling-final");
+        let dir = scratch.path();
+        std::fs::create_dir_all(dir.join("denied")).unwrap();
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        // The target is absent, so the full path cannot be canonicalized.
+        std::os::unix::fs::symlink(dir.join("denied/planted"), dir.join("a/link")).unwrap();
+        assert!(
+            !dir.join("denied/planted").exists(),
+            "the target must be absent for this to be the dangling case"
+        );
+
+        let resolved = resolve_aliases(&dir.join("a/link")).unwrap();
+        assert_eq!(
+            resolved,
+            dir.canonicalize().unwrap().join("denied/planted"),
+            "must resolve to the destination, not the link"
+        );
+        assert_ne!(
+            resolved,
+            dir.canonicalize().unwrap().join("a/link"),
+            "must not fall back to the link path"
+        );
+    }
+
+    /// A dangling symlink in the middle of a path, with further components
+    /// after it. The whole chain below the link is missing.
+    #[test]
+    #[cfg(unix)]
+    fn dangling_intermediate_symlink_resolves_to_its_destination() {
+        let scratch = Scratch::new("dangling-intermediate");
+        let dir = scratch.path();
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        // `a/link` points at a directory that does not exist.
+        std::os::unix::fs::symlink(dir.join("absent"), dir.join("a/link")).unwrap();
+
+        let resolved = resolve_aliases(&dir.join("a/link/child/leaf")).unwrap();
+        assert_eq!(
+            resolved,
+            dir.canonicalize().unwrap().join("absent/child/leaf")
+        );
+        assert_ne!(
+            resolved,
+            dir.canonicalize().unwrap().join("a/link/child/leaf"),
+            "must not fall back to the link path"
+        );
+    }
+
+    /// A symlink to a not-yet-existing target, where the caller intends to
+    /// create it. Resolution must report where it will be created, which is
+    /// what makes a `deny` on the destination fire.
+    #[test]
+    #[cfg(unix)]
+    fn symlink_to_absent_target_reports_creation_site() {
+        let scratch = Scratch::new("absent-target");
+        let dir = scratch.path();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("dst")).unwrap();
+        std::os::unix::fs::symlink(dir.join("dst/created"), dir.join("src/link")).unwrap();
+
+        // Where a create through this link would actually land.
+        let resolved = resolve_aliases(&dir.join("src/link")).unwrap();
+        assert_eq!(resolved, dir.canonicalize().unwrap().join("dst/created"));
+        assert!(!resolved.exists(), "the destination still does not exist");
+    }
+
+    /// A chain of symlinks ending in a target that does not exist. Each hop
+    /// must be followed, not just the first.
+    #[test]
+    #[cfg(unix)]
+    fn chained_dangling_symlinks_resolve_to_the_final_destination() {
+        let scratch = Scratch::new("chained-dangling");
+        let dir = scratch.path();
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        // a/one -> b/two, b/two -> c/three, and c does not exist.
+        std::os::unix::fs::symlink(dir.join("b/two"), dir.join("a/one")).unwrap();
+        std::os::unix::fs::symlink(dir.join("c/three"), dir.join("b/two")).unwrap();
+
+        let resolved = resolve_aliases(&dir.join("a/one")).unwrap();
+        assert_eq!(resolved, dir.canonicalize().unwrap().join("c/three"));
+    }
+
+    /// A dangling symlink whose target is absolute. The root and prefix are
+    /// rebuilt from the target rather than assumed, which is what keeps
+    /// Windows drive identity intact.
+    #[test]
+    #[cfg(unix)]
+    fn absolute_dangling_target_restarts_from_the_root() {
+        let scratch = Scratch::new("absolute-dangling");
+        let dir = scratch.path();
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let target = dir.canonicalize().unwrap().join("nowhere/at/all");
+        std::os::unix::fs::symlink(&target, dir.join("a/link")).unwrap();
+
+        let resolved = resolve_aliases(&dir.join("a/link")).unwrap();
+        assert_eq!(resolved, target);
+        assert!(resolved.is_absolute());
+    }
+
+    /// A relative input must resolve to an absolute result even when the tail
+    /// is missing. A relative authorized path would be re-resolved against
+    /// whatever the working directory is at syscall time.
+    #[test]
+    fn relative_input_resolves_to_an_absolute_path() {
+        let scratch = Scratch::new("relative-input");
+        let dir = scratch.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+
+        // A path relative to the current directory whose tail is missing.
+        // The scratch directory above is not involved: `a/missing/...` is
+        // taken against the process working directory, which is what a caller
+        // passing a relative path means.
+        let relative = Path::new("a").join("missing").join("leaf.txt");
+        let resolved = resolve_aliases(&relative).unwrap();
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+
+        assert!(
+            resolved.is_absolute(),
+            "a relative request must still resolve to an absolute path, got {resolved:?}"
+        );
+        assert_eq!(resolved, cwd.join("a/missing/leaf.txt"));
+        assert!(!dir.join("a").exists() || resolved.starts_with(&cwd));
     }
 
     /// A dangling final symlink must resolve to where it points, not stay as

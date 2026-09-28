@@ -27,6 +27,31 @@ fn unique_path(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("nitera-{tag}-{}-{n}-{nanos}", std::process::id()))
 }
 
+/// Creates a symlink at `link` pointing to `target`.
+///
+/// The symlink tests guard on `symlinks_available()` at runtime, but the
+/// call itself still has to compile on platforms without `std::os::unix`.
+#[cfg(unix)]
+fn symlink(
+    target: impl AsRef<std::path::Path>,
+    link: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Unreachable in practice, because the tests skip first. Present so this
+/// file compiles on targets without symlink support.
+#[cfg(not(unix))]
+fn symlink(
+    _target: impl AsRef<std::path::Path>,
+    _link: impl AsRef<std::path::Path>,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
+}
+
 /// True when this platform lets the test create a symlink.
 ///
 /// The symlink regressions need a real link. Off unix they report that they
@@ -1535,8 +1560,7 @@ fn audit_item1_symlink_defeats_explicit_deny() {
         eprintln!("reported as skipped: symlinks are not creatable on this platform");
         return;
     }
-    std::os::unix::fs::symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape"))
-        .unwrap();
+    symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape")).unwrap();
 
     // Control: the direct spelling is denied, so the policy is loaded and
     // the deny rule is present.
@@ -1590,8 +1614,7 @@ fn audit_item1_symlink_defeats_deny_with_index() {
         eprintln!("reported as skipped: symlinks are not creatable on this platform");
         return;
     }
-    std::os::unix::fs::symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape"))
-        .unwrap();
+    symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape")).unwrap();
 
     assert_eq!(
         n.check(&NiteraRequest::filesystem(Operation::Read, "./Secrets/key")),
@@ -1778,8 +1801,7 @@ fn deny_anchor_survives_a_symlinked_request_path() {
         eprintln!("reported as skipped: symlinks are not creatable on this platform");
         return;
     }
-    std::os::unix::fs::symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape"))
-        .unwrap();
+    symlink(tree.path.join("Secrets"), tree.path.join("allowed/escape")).unwrap();
 
     let r = n.read("./allowed/escape/key");
     assert!(
@@ -1862,7 +1884,7 @@ fn delete_judges_a_symlink_by_its_own_location() {
         eprintln!("reported as skipped: symlinks are not creatable on this platform");
         return;
     }
-    std::os::unix::fs::symlink(tree.path.join("target"), tree.path.join("links/point")).unwrap();
+    symlink(tree.path.join("target"), tree.path.join("links/point")).unwrap();
 
     // `./target/**` is readable, `./links/**` is not deletable.
     let n = tree.load(b"[filesystem]\nallow read ./target/**\nallow delete ./target/**\n");
@@ -1895,7 +1917,7 @@ fn execute_authorizes_the_resolved_working_directory() {
         eprintln!("reported as skipped: symlinks are not creatable on this platform");
         return;
     }
-    std::os::unix::fs::symlink(tree.path.join("outside"), tree.path.join("work/escape")).unwrap();
+    symlink(tree.path.join("outside"), tree.path.join("work/escape")).unwrap();
 
     // Running in the scoped directory directly is allowed.
     assert!(
@@ -1932,7 +1954,7 @@ fn dangling_symlink_cannot_plant_bytes_in_a_denied_directory() {
         return;
     }
     // Dangling: `denied/planted` does not exist yet.
-    std::os::unix::fs::symlink(tree.path.join("denied/planted"), tree.path.join("a/link")).unwrap();
+    symlink(tree.path.join("denied/planted"), tree.path.join("a/link")).unwrap();
     assert!(
         !tree.path.join("denied/planted").exists(),
         "the symlink target must not exist for this to be the dangling case"
@@ -1968,7 +1990,7 @@ fn dangling_symlink_cannot_create_in_a_denied_directory() {
         eprintln!("reported as skipped: symlinks are not creatable on this platform");
         return;
     }
-    std::os::unix::fs::symlink(tree.path.join("denied/fresh"), tree.path.join("a/link")).unwrap();
+    symlink(tree.path.join("denied/fresh"), tree.path.join("a/link")).unwrap();
 
     let n = tree.load(b"[filesystem]\nallow create ./**\ndeny create ./denied/**\n");
 
