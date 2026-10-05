@@ -2,7 +2,7 @@
 //! Policy/PathPattern types keep their existing representation and behavior.
 
 use super::model::{PathPattern, Policy};
-use super::path::{normalize_pattern, resolve_runtime_path_with_home};
+use super::path::{is_home_relative, normalize_pattern, resolve_runtime_path_with_home};
 use crate::engine::{Decision, NiteraRequest, Operation, Resource, Target};
 use std::ffi::OsString;
 use std::path::Path;
@@ -17,14 +17,17 @@ enum Tail {
 struct PreparedPath {
     prefix: String,
     tail: Tail,
+    home_relative: bool,
 }
 
 impl PreparedPath {
     fn new(pattern: &PathPattern, base: &Path) -> Self {
+        let home_relative = is_home_relative(Path::new(&pattern.0));
         let Ok(normalized) = normalize_pattern(&pattern.0, base) else {
             return Self {
                 prefix: String::new(),
                 tail: Tail::Never,
+                home_relative,
             };
         };
         let parts: Vec<_> = normalized.split('/').collect();
@@ -32,6 +35,7 @@ impl PreparedPath {
             return Self {
                 prefix: normalized,
                 tail: Tail::Exact,
+                home_relative,
             };
         };
         let prefix = parts[..first_glob].join("/");
@@ -47,7 +51,11 @@ impl PreparedPath {
         } else {
             Tail::Glob(suffix.into_boxed_slice())
         };
-        Self { prefix, tail }
+        Self {
+            prefix,
+            tail,
+            home_relative,
+        }
     }
 
     fn matches(&self, path: &str) -> bool {
@@ -191,6 +199,10 @@ impl PathSet {
         self.patterns.is_empty()
     }
 
+    fn has_home_relative(&self) -> bool {
+        self.patterns.iter().any(|pattern| pattern.home_relative)
+    }
+
     #[inline]
     fn matches(&self, path: &str) -> bool {
         if self.patterns.is_empty() {
@@ -262,6 +274,12 @@ impl PathRules {
             Decision::Deny
         }
     }
+
+    fn has_home_relative(&self) -> bool {
+        self.deny.has_home_relative()
+            || self.ask.has_home_relative()
+            || self.allow.has_home_relative()
+    }
 }
 
 pub(crate) struct PreparedPolicy {
@@ -320,10 +338,18 @@ impl PreparedPolicy {
         if home != self.home {
             return self.source.evaluate(request, base);
         }
-        let Some(home) = home else {
+        if home.is_none()
+            && (is_home_relative(path)
+                || rules.is_some_and(PathRules::has_home_relative)
+                || (rules.is_none() && self.scope.has_home_relative()))
+        {
             return Decision::Deny;
-        };
-        let path = resolve_runtime_path_with_home(path, base, &home);
+        }
+        let path = resolve_runtime_path_with_home(
+            path,
+            base,
+            home.as_deref().unwrap_or(std::ffi::OsStr::new("")),
+        );
         let path = path.to_string_lossy();
         if let Some(rules) = rules {
             return rules.evaluate(&path);

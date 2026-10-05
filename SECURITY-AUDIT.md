@@ -1,7 +1,7 @@
 # Security and hardening audit
 
-**Status: items 4 and 5 are fixed in the repository (not yet released). Items
-6, 12, and 16 are fixed and shipped in 1.0.1, the first
+**Status: items 4, 5, 13, and 17 are fixed in the repository (not yet
+released). Items 6, 12, and 16 are fixed and shipped in 1.0.1, the first
 published version to contain them. Item 19 is fixed in the repository only,
 because `examples/` is not part of the published package, so no release
 carries it. Items 1, 2, 3, and 18 are open, and 1, 2, and 18 are confirmed
@@ -87,11 +87,11 @@ Numbering matches the detailed findings and sequencing table.
 | 10 | Filesystem operation coverage is incomplete | model gap | public API inspected | open |
 | 11 | create_dir creates only one level | feature limitation | missing-parent error verified | open |
 | 12 | Bare .nitera filename rejected by load | correctness | original error reproduced; regression test added | fixed, shipped in 1.0.1 (#3) |
-| 13 | HOME required for ordinary filesystem/process paths | robustness | isolated missing-HOME probe | open |
+| 13 | HOME required for ordinary filesystem/process paths | robustness | isolated no-HOME regressions for ordinary and tilde paths | fixed in repository, unreleased |
 | 14 | Denied error does not carry the request | auditability | error representation inspected | open |
 | 15 | Public types have compatibility constraints on extension | API evolution | type definitions inspected | open |
 | 16 | Nitera lacks Debug in 1.0.0 | ergonomics | implementation and regression test reviewed | fixed, shipped in 1.0.1 (#3) |
-| 17 | Normalization errors become nonmatching patterns | latent hardening concern | missing-HOME scenario fails closed | open; no demonstrated bypass |
+| 17 | Normalization errors become nonmatching patterns | latent hardening concern | unresolved tilde rules fail closed in public and prepared evaluators | fixed in repository, unreleased |
 | 18 | /tmp versus /private/tmp alias can bypass a deny | security, related to #1 | protected synthetic payload returned | open |
 | 19 | Example host allow is overridden by deny host * | documentation | resulting Deny verified | fixed, repository only |
 
@@ -393,10 +393,7 @@ prerequisites.
 
 ### 13. HOME required without tilde expansion
 
-Filesystem and process path resolution require HOME even for ordinary
-paths. With HOME absent, guarded reads return an I/O error and checks deny.
-Network checks do not have this dependency, so the entire crate is not
-uniformly unusable without HOME.
+The current path resolver reads HOME even for ordinary paths. With HOME absent, ordinary guarded operations fail or deny despite not needing home expansion. Network checks do not have this dependency.
 
 **Corrected approach.** Resolve home only for a supported home-relative
 form (`~` or `~/...`, plus explicitly defined platform equivalents).
@@ -411,10 +408,20 @@ the current documented response to HOME changes, or introduce an explicit
 versioned immutable-home contract; do not accidentally freeze old denies.
 Review item 17 in the same change.
 
-**Required checks.** HOME absent with ordinary rules; absent with a
-home-relative deny plus broad allow; set, unset, or changed after loading;
-and public/prepared evaluator parity. Run environment changes in isolated
-processes. Any speedup remains unmeasured.
+**Status: fixed in repository, unreleased.** Ordinary absolute and relative
+paths resolve without reading HOME; only `~` and `~/...` require it. Public
+and prepared evaluators preserve the existing behavior when HOME changes: a
+loaded policy falls back to the source evaluator. With HOME unset, any request
+or relevant rule that is home-relative returns Deny, preventing an unresolved
+deny, ask, or process scope from falling through to a broader allow.
+Regression coverage runs environment changes in an isolated child in
+`tests/prepared_policy.rs` and checks public/prepared parity. The public
+matcher still reports an unresolved individual pattern as nonmatching; the
+policy evaluators enforce the fail-closed behavior around it. No API change.
+
+**Required checks completed.** HOME absent with ordinary filesystem/process
+rules; absent with unresolved home-relative deny/scope plus broad allow; and
+set, unset, and changed after loading. Runtime coverage is on macOS only.
 
 ### 14. Denied errors lack request context
 
@@ -474,20 +481,16 @@ PreparedPath uses `Tail::Never` on normalization failure and public
 PathPattern matching returns false. That representation is a hardening
 concern if a failed deny can coexist with a successful allow.
 
-The tested missing-HOME scenario is not currently a demonstrated bypass.
-While HOME is absent, path authorization fails closed; if HOME changes,
-PreparedPolicy deliberately falls back to the source evaluator. This is
-documented and tested behavior, not protection established only by accident.
+`PreparedPath` still uses `Tail::Never` when a home-relative pattern cannot be
+prepared without HOME, and the public matcher returns false for that pattern.
+The policy evaluators now detect unresolved home-relative rules and return
+Deny rather than allowing a broad rule to match. When HOME changes, the loaded
+policy still falls back to the source evaluator, which applies the same guard.
 
-**Corrected approach.** Preserve those guarantees while changing item 13.
-Prefer fallible policy preparation that rejects unresolved enforcement
-rules, with contextual diagnostics. A future fallible public matcher must
-propagate errors through evaluators as denial/failure, not `unwrap_or(false)`
-for deny lists. A warning alone is insufficient if a deny becomes inactive.
-Assess the API compatibility of returning Result before changing it.
-
-**Required checks.** An invalid/unresolved deny plus a broad allow must
-never return Allow in either evaluator, including after environment changes.
+**Status: fixed with item 13.** This closes the fail-open composition concern
+without changing the public matcher API or making policy loading fallible.
+Coverage includes unresolved filesystem denies and process scopes alongside
+broad grants in both evaluators.
 
 ### 18. macOS /tmp aliases can bypass deny rules
 
@@ -572,7 +575,7 @@ across changes that temporarily allow requests the policy should deny.
 | 1 | 1, 2, 3, 18 | Commit isolated bypass regressions and a platform/path semantics contract; distinguish static-alias mitigation from race resistance. |
 | 2 | 1, 18 | Implement shared, operation-aware resolved authorization; pass symlink, alias, creation, deletion, and cwd checks; benchmark guarded operations. |
 | 3 | 2, 3 | Enforce supported filesystem name equivalence through both matchers and candidate indexes; reject unsupported enforcement modes; run platform tests. |
-| 4 | 13, 17 | Remove unnecessary home lookup without permitting unresolved deny rules; pass isolated environment-transition tests. |
+| 4 | 13, 17 | Completed in repository: HOME needed only for tilde paths; unresolved home-relative rules fail closed in both evaluators. |
 | 5 | 4, 5 | Completed in repository: additive quoted-value grammar; parsing and decision regressions. |
 | 6 | 19 | Correct the example and verify intended host decisions. This independent docs fix may land earlier. |
 | 7 | 14, 15 | Choose compatible audit events or a breaking error/type release, with downstream migration tests. |

@@ -111,13 +111,13 @@ Any unrecognized action or kind word, or a rule missing its values, produces a `
 
 ### Resolution mechanics
 
-- `expand_home(path)`: a bare `~` becomes `$HOME`; a `~/...` prefix becomes `$HOME/...`; anything else passes through unchanged. Requires the `HOME` environment variable to be set, returns an `io::Error` if it isn't.
+- `expand_home(path)`: a bare `~` becomes `$HOME`; a `~/...` prefix becomes `$HOME/...`; anything else passes through unchanged. `HOME` is required only for the home-relative forms, and an unset value returns an `io::Error` for those forms.
 - `normalize_path(path)`: purely lexical, resolves `.` (dropped) and `..` (pops the previous segment), no filesystem access, so it works for paths that don't exist yet. A leading `..` past the root doesn't error, it's dropped once there's nothing left to pop.
-- `resolve_runtime_path(path, base)`: expands `~`, resolves a relative result against `base`, then lexically normalizes. Filesystem operations and `execute` use it for their path or working directory, with `base` set to the `Nitera`'s root. Like `expand_home`, it requires `HOME` to be set, including for paths without `~`.
+- `resolve_runtime_path(path, base)`: expands `~` when present, resolves a relative result against `base`, then lexically normalizes. Filesystem operations and `execute` use it for their path or working directory, with `base` set to the `Nitera`'s root. Ordinary paths do not depend on `HOME`.
 - `normalize_runtime_path(path)`: the same, but resolves against `std::env::current_dir()` instead of an explicit base. It is a standalone convenience helper, not used inside `Nitera` itself.
 - `normalize_pattern(pattern, base)`: the pattern-string equivalent. Loaded policies use it during preparation; public `PathPattern` matching normalizes patterns on demand.
 
-On Unix, prepared checks can borrow an already-normalized absolute request path and normalize relative paths without building an intermediate joined buffer. Other platforms retain their existing path-joining behavior. These are allocation optimizations: path normalization remains lexical and `HOME` validation still applies. Non-UTF-8 paths use the same `to_string_lossy()` conversion as the public matcher.
+On Unix, prepared checks can borrow an already-normalized absolute request path and normalize relative paths without building an intermediate joined buffer. Other platforms retain their existing path-joining behavior. These are allocation optimizations: path normalization remains lexical. Non-UTF-8 paths use the same `to_string_lossy()` conversion as the public matcher.
 
 ### A note on traversal
 
@@ -170,7 +170,7 @@ Each path rule list chooses between a scan and a sorted prefix index:
 
 Process scopes use the same path lookup. A matching scope is required before the command's deny/ask/allow lists are evaluated. Commands still use exact string matching, and network rules still scan host patterns. The index does not cache request decisions or change precedence.
 
-While `HOME` matches its value at load time, path checks use the prepared rules. If it changes, checks use the retained source policy and resolve home-relative rules against the current value. If `HOME` is unset, filesystem and process path checks fail closed. This preserves home-relative deny rules even when a broad allow rule could also match.
+While `HOME` matches its value at load time, path checks use the prepared rules. If it changes, checks use the retained source policy and resolve home-relative rules against the current value. Ordinary paths and policies work when `HOME` is unset. If a request or any relevant rule uses a home-relative path while `HOME` is unset, that filesystem or process check returns `Deny`; an unresolved rule cannot fall through to a broader allow or scope.
 
 Preparation and sorting add load-time work and temporary memory. Lookup can avoid visiting unrelated rules in a selective set, but broad glob groups may still require many matches. See [`BENCHMARKS.md`](BENCHMARKS.md) for the reported Apple M2 measurements, charts, and comparison limits.
 
