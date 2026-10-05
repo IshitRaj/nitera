@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Policy values can now be double-quoted to include literal commas, hashes, and spaces. Quoted values support escaped quotes and backslashes; legacy unquoted values retain their previous interpretation. Malformed unclosed quoted values report their source line.
+
 ## [1.0.1] - 2026-09-28
 
 ### Fixed
