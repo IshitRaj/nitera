@@ -71,12 +71,76 @@ fn parse_rule<'a>(line: &'a str, line_number: usize) -> Result<Rule<'a>, ParseEr
 }
 
 fn parse_values(values: &str, line_number: usize, error: &str) -> Result<Vec<String>, ParseError> {
-    let values = values
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    let mut parsed = Vec::new();
+    let mut value = String::new();
+    let mut chars = values.chars().peekable();
+    let mut quoted = false;
+    let mut was_quoted = false;
+    let mut token_started = false;
+
+    while let Some(ch) = chars.next() {
+        if quoted {
+            match ch {
+                '\\' => match chars.next() {
+                    Some(escaped @ ('\\' | '"')) => value.push(escaped),
+                    Some(other) => {
+                        value.push('\\');
+                        value.push(other);
+                    }
+                    None => {
+                        return Err(ParseError::new(
+                            line_number,
+                            "trailing escape in quoted value",
+                        ));
+                    }
+                },
+                '"' => quoted = false,
+                _ => value.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '"' if !token_started && value.trim().is_empty() => {
+                value.clear();
+                quoted = true;
+                was_quoted = true;
+                token_started = true;
+            }
+            ',' => {
+                let item = if was_quoted {
+                    value.clone()
+                } else {
+                    value.trim().to_owned()
+                };
+                if !item.is_empty() {
+                    parsed.push(item);
+                }
+                value.clear();
+                token_started = false;
+                was_quoted = false;
+            }
+            _ => {
+                value.push(ch);
+                if !ch.is_whitespace() {
+                    token_started = true;
+                }
+            }
+        }
+    }
+
+    if quoted {
+        return Err(ParseError::new(line_number, "unclosed quoted value"));
+    }
+    let item = if was_quoted {
+        value.clone()
+    } else {
+        value.trim().to_owned()
+    };
+    if !item.is_empty() {
+        parsed.push(item);
+    }
+    let values = parsed;
 
     if values.is_empty() {
         return Err(ParseError::new(line_number, error));
@@ -217,8 +281,41 @@ pub fn parse(input: &str) -> Result<Policy, ParseError> {
     for (index, raw_line) in input.lines().enumerate() {
         let line_number = index + 1;
 
-        // Remove comments.
-        let line = raw_line.split('#').next().unwrap_or("").trim();
+        // Strip comments only outside a quoted value. Bare values retain the
+        // legacy interpretation, including any literal quote characters.
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut quote_can_start = true;
+        let mut end = raw_line.len();
+        for (offset, ch) in raw_line.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if quoted && ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' && (quoted || quote_can_start) {
+                quoted = !quoted;
+                quote_can_start = false;
+                continue;
+            }
+            if ch == '#' && !quoted {
+                end = offset;
+                break;
+            }
+            if !quoted {
+                if ch == ',' {
+                    quote_can_start = true;
+                } else if ch.is_whitespace() {
+                    quote_can_start = true;
+                } else {
+                    quote_can_start = false;
+                }
+            }
+        }
+        let line = raw_line[..end].trim();
 
         // Ignore blank lines.
         if line.is_empty() {

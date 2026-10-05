@@ -1,6 +1,7 @@
 # Security and hardening audit
 
-**Status: items 6, 12, and 16 are fixed and shipped in 1.0.1, the first
+**Status: items 4 and 5 are fixed in the repository (not yet released). Items
+6, 12, and 16 are fixed and shipped in 1.0.1, the first
 published version to contain them. Item 19 is fixed in the repository only,
 because `examples/` is not part of the published package, so no release
 carries it. Items 1, 2, 3, and 18 are open, and 1, 2, and 18 are confirmed
@@ -77,8 +78,8 @@ Numbering matches the detailed findings and sequencing table.
 | 1 | Symlink traversal bypasses narrow allows and explicit denies | security | protected synthetic payload returned | open |
 | 2 | Case-insensitive filesystem names bypass case-sensitive denies | security | protected synthetic payload returned on macOS | open |
 | 3 | Windows path representation and HOME assumptions | correctness | source inspection; Windows execution required | open |
-| 4 | Commas cannot be represented literally in values | grammar limitation | parser output verified | open |
-| 5 | Hashes start comments even inside intended paths | grammar limitation | parser output verified | open |
+| 4 | Commas cannot be represented literally in values | grammar limitation | quoted values and decision regression added | fixed in repository, unreleased |
+| 5 | Hashes start comments even inside intended paths | grammar limitation | quoted values, comment handling, and decision regression added | fixed in repository, unreleased |
 | 6 | Repeated whitespace between action and kind breaks parsing | correctness | original error reproduced; regression tests added | fixed, shipped in 1.0.1 (#3) |
 | 7 | Process arguments are not evaluated | model gap | policy decisions verified | open |
 | 8 | Network ports are not evaluated | model gap | decisions for several ports verified | open |
@@ -227,6 +228,16 @@ support explicit escapes for quotes and backslashes and reject malformed
 input with line information. Keep spaces within a quoted value intact.
 Changing only `parse_rule` or `parse_values` is insufficient because
 `parse()` currently strips comments first.
+
+**Status: fixed in repository, unreleased.** Parsing now recognizes double-
+quoted comma-list entries, preserves literal commas, hashes, and spaces in
+them, and supports `\\` and `\"` escapes. Unclosed quotes and trailing
+escapes return line-numbered parse errors. Bare values retain their legacy
+interpretation, including quote characters unless a quote begins a list entry.
+Coverage is in `tests/policy_parser.rs` and
+`quoted_hash_and_comma_paths_are_enforced_as_literal_denies` in
+`tests/policy_evaluation.rs`. The additive grammar does not require migration.
+Parsing cost is limited to load time; the `check()` workload is unchanged.
 
 Use an explicit grammar-version/migration decision: existing bare values
 can contain quote characters literally. Do not promise universal backward
@@ -562,7 +573,7 @@ across changes that temporarily allow requests the policy should deny.
 | 2 | 1, 18 | Implement shared, operation-aware resolved authorization; pass symlink, alias, creation, deletion, and cwd checks; benchmark guarded operations. |
 | 3 | 2, 3 | Enforce supported filesystem name equivalence through both matchers and candidate indexes; reject unsupported enforcement modes; run platform tests. |
 | 4 | 13, 17 | Remove unnecessary home lookup without permitting unresolved deny rules; pass isolated environment-transition tests. |
-| 5 | 4, 5 | Approve a versioned quote/escape grammar; preserve or explicitly migrate legacy values; pass parsing and decision regressions. |
+| 5 | 4, 5 | Completed in repository: additive quoted-value grammar; parsing and decision regressions. |
 | 6 | 19 | Correct the example and verify intended host decisions. This independent docs fix may land earlier. |
 | 7 | 14, 15 | Choose compatible audit events or a breaking error/type release, with downstream migration tests. |
 | 8 | 7, 8, 9 | Add explicit argv, endpoint, environment, and executable semantics; preserve legacy unrestricted grants unless a migration changes them. |

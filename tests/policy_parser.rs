@@ -526,6 +526,46 @@ fn values_field_still_keeps_spaces_around_commas() {
 }
 
 #[test]
+fn quoted_values_preserve_commas_hashes_spaces_and_escapes() {
+    let policy = parse(
+        r#"[filesystem]
+deny read "./a,b# c", "./say\"hi\\there"
+"#,
+    )
+    .unwrap();
+    assert_eq!(policy.filesystem.deny.read[0].0, "./a,b# c");
+    assert_eq!(policy.filesystem.deny.read[1].0, "./say\"hi\\there");
+}
+
+#[test]
+fn quoted_value_can_be_followed_by_comments_and_mixed_list_values() {
+    let policy = parse("[filesystem]\nallow read ./plain, \"./a#b\" # trailing comment\n").unwrap();
+    assert_eq!(
+        policy
+            .filesystem
+            .allow
+            .read
+            .iter()
+            .map(|p| p.0.as_str())
+            .collect::<Vec<_>>(),
+        ["./plain", "./a#b"]
+    );
+}
+
+#[test]
+fn bare_quote_characters_keep_their_legacy_literal_meaning() {
+    let policy = parse("[filesystem]\nallow read ./a\"b\n").unwrap();
+    assert_eq!(policy.filesystem.allow.read[0].0, "./a\"b");
+}
+
+#[test]
+fn rejects_unclosed_quoted_values_with_line_number() {
+    let error = parse("[filesystem]\ndeny read \"./secret#key\n").unwrap_err();
+    assert_eq!(error.line, 2);
+    assert_eq!(error.message, "unclosed quoted value");
+}
+
+#[test]
 fn still_reports_missing_rule_when_there_is_no_second_field() {
     let error = parse("[filesystem]\nallow\n").unwrap_err();
 

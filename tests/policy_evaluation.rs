@@ -7,6 +7,7 @@ mod tests {
     use nitera::policy::model::{
         FilesystemPolicy, FilesystemRules, HostPattern, NetworkPolicy, PathPattern, ProcessPolicy,
     };
+    use nitera::policy::parse;
 
     fn test_policy() -> Policy {
         Policy {
@@ -104,6 +105,21 @@ mod tests {
         let request = NiteraRequest::filesystem(Operation::Read, "/tmp/secret/password.txt");
 
         assert_eq!(policy.evaluate(&request, Path::new("/")), Decision::Deny);
+    }
+
+    #[test]
+    fn quoted_hash_and_comma_paths_are_enforced_as_literal_denies() {
+        let policy = parse("[filesystem]\nallow read ./**\ndeny read \"./a,b#key\"\n").unwrap();
+        let request = NiteraRequest::filesystem(Operation::Read, "./a,b#key");
+        assert_eq!(
+            policy.evaluate(&request, Path::new("/policy")),
+            Decision::Deny
+        );
+        let nearby = NiteraRequest::filesystem(Operation::Read, "./a,b");
+        assert_eq!(
+            policy.evaluate(&nearby, Path::new("/policy")),
+            Decision::Allow
+        );
     }
 
     #[test]

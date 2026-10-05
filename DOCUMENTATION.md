@@ -62,7 +62,7 @@ These exist for building tooling around Nitera (a `.nitera` linter, a policy vis
 
 A `.nitera` file is read line by line, 1-indexed for error messages.
 
-- Everything from a `#` to the end of the line is stripped as a comment, so `#` can't appear inside a value (a path, for instance) without being treated as the start of a comment.
+- Everything from a `#` to the end of the line is stripped as a comment unless it appears inside a double-quoted value. Quoted values may escape `\\` and `\"`; other backslash sequences retain the backslash literally. Bare values keep their legacy parsing, including literal quote characters that do not begin a quoted list entry.
 - Blank lines, after comment-stripping and trimming, are skipped.
 - A line of the exact form `[filesystem]`, `[process]`, or `[network]` switches the active section. Any other bracketed line is a parse error (`unknown section`).
 - Every other non-blank line is a rule, split into up to three whitespace-separated fields: `<action> <kind> <values...>`. The third field is everything remaining after the second, not re-split on whitespace, so a values list can contain spaces (e.g. around commas) without breaking the split.
@@ -74,7 +74,7 @@ A `.nitera` file is read line by line, 1-indexed for error messages.
 <allow|ask|deny> <read|write|delete|create> <path>[, <path>...]
 ```
 
-`values` is split on commas, each entry trimmed, empty entries dropped, at least one value required. Each becomes a `PathPattern` appended to the matching action/kind list (e.g. `ask` + `write` appends to `filesystem.ask.write`). A `create` pattern governs both file and directory creation.
+`values` are comma-separated; unquoted entries are trimmed, empty entries dropped, and at least one value is required. A double-quoted entry preserves commas, hashes, and surrounding spaces; inside it, `\\` and `\"` escape a backslash and quote. For example, `deny read "./folder/a,b#c"` denotes one literal pattern. Unquoted values retain their prior interpretation.
 
 ### `[process]`
 
