@@ -6,6 +6,10 @@ use std::path::{Component, Path, PathBuf};
 pub fn expand_home(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let path = path.as_ref();
 
+    if !is_home_relative(path) {
+        return Ok(path.to_path_buf());
+    }
+
     let home = std::env::var_os("HOME").ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -14,6 +18,10 @@ pub fn expand_home(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     })?;
 
     Ok(expand_home_with(path, &home).into_owned())
+}
+
+pub(crate) fn is_home_relative(path: &Path) -> bool {
+    path == Path::new("~") || path.to_string_lossy().starts_with("~/")
 }
 
 fn expand_home_with<'a>(path: &'a Path, home: &'a OsStr) -> Cow<'a, Path> {
@@ -79,14 +87,24 @@ pub fn resolve_runtime_path(
     path: impl AsRef<Path>,
     base: impl AsRef<Path>,
 ) -> std::io::Result<PathBuf> {
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "HOME environment variable not set",
-        )
-    })?;
+    let path = path.as_ref();
+    let home = if is_home_relative(path) {
+        Some(std::env::var_os("HOME").ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "HOME environment variable not set",
+            )
+        })?)
+    } else {
+        None
+    };
 
-    Ok(resolve_runtime_path_with_home(path.as_ref(), base.as_ref(), &home).into_owned())
+    Ok(resolve_runtime_path_with_home(
+        path,
+        base.as_ref(),
+        home.as_deref().unwrap_or(OsStr::new("")),
+    )
+    .into_owned())
 }
 
 pub(crate) fn resolve_runtime_path_with_home<'a>(

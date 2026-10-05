@@ -1,4 +1,5 @@
 use super::model::{HostPattern, PathPattern, Policy};
+use super::path::is_home_relative;
 use crate::engine::{Decision, NiteraRequest, Operation, Resource, Target};
 use std::path::Path;
 
@@ -10,6 +11,18 @@ impl Policy {
         ask: &[PathPattern],
         allow: &[PathPattern],
     ) -> Decision {
+        let has_home_relative = deny
+            .iter()
+            .chain(ask)
+            .chain(allow)
+            .any(|pattern| is_home_relative(std::path::Path::new(&pattern.0)))
+            || is_home_relative(path);
+        if has_home_relative && std::env::var_os("HOME").is_none() {
+            // A home-relative rule cannot be evaluated. Do not let a broad
+            // allow match after an unresolved deny or ask has become a miss.
+            return Decision::Deny;
+        }
+
         if deny.iter().any(|pattern| pattern.matches_from(path, base)) {
             return Decision::Deny;
         }
@@ -91,6 +104,17 @@ impl Policy {
                     cwd,
                 },
             ) => {
+                if std::env::var_os("HOME").is_none()
+                    && (is_home_relative(cwd)
+                        || self
+                            .process
+                            .scope
+                            .iter()
+                            .any(|scope| is_home_relative(std::path::Path::new(&scope.0))))
+                {
+                    return Decision::Deny;
+                }
+
                 if !self
                     .process
                     .scope

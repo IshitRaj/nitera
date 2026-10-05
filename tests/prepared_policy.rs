@@ -256,6 +256,53 @@ fn home_changes_child() {
             );
         }
     }
+
+    // Ordinary paths no longer depend on HOME. If a home-relative rule is
+    // unresolved, however, no broader rule may turn that unknown into Allow.
+    unsafe { std::env::remove_var("HOME") };
+    let ordinary_text = "[filesystem]\nallow read ./ordinary/**\n[process]\nallow scope ./ordinary/**\nallow command git\n";
+    std::fs::write(&file, ordinary_text).unwrap();
+    let ordinary_policy = parse(ordinary_text).unwrap();
+    let ordinary_nitera = Nitera::load(&file).unwrap();
+    let ordinary_path = root.join("ordinary/file");
+    let ordinary_read = NiteraRequest::filesystem(Operation::Read, &ordinary_path);
+    assert_eq!(ordinary_nitera.check(&ordinary_read), Decision::Allow);
+    assert_eq!(
+        ordinary_policy.evaluate(&ordinary_read, &root),
+        Decision::Allow
+    );
+    let relative_read = NiteraRequest::filesystem(Operation::Read, "./ordinary/file");
+    assert_eq!(ordinary_nitera.check(&relative_read), Decision::Allow);
+    assert_eq!(
+        ordinary_policy.evaluate(&relative_read, &root),
+        Decision::Allow
+    );
+    let ordinary_process = NiteraRequest::process("git", ["status"], "./ordinary");
+    assert_eq!(ordinary_nitera.check(&ordinary_process), Decision::Allow);
+    assert_eq!(
+        ordinary_policy.evaluate(&ordinary_process, &root),
+        Decision::Allow
+    );
+    assert!(nitera::policy::path::resolve_runtime_path("./ordinary/file", &root).is_ok());
+    assert!(nitera::policy::path::resolve_runtime_path("~/ordinary/file", &root).is_err());
+
+    let unresolved_text = concat!(
+        "[filesystem]\ndeny read ~/private/**\nallow read /**\n",
+        "[process]\nallow scope ~/private/**, /**\nallow command git\n",
+    );
+    std::fs::write(&file, unresolved_text).unwrap();
+    let unresolved_policy = parse(unresolved_text).unwrap();
+    let unresolved_nitera = Nitera::load(&file).unwrap();
+    let private = NiteraRequest::filesystem(Operation::Read, root.join("private/secret"));
+    let public = NiteraRequest::filesystem(Operation::Read, root.join("public"));
+    for request in [&private, &public] {
+        assert_eq!(unresolved_nitera.check(request), Decision::Deny);
+        assert_eq!(unresolved_policy.evaluate(request, &root), Decision::Deny);
+    }
+    let process = NiteraRequest::process("git", ["status"], root.join("public"));
+    assert_eq!(unresolved_nitera.check(&process), Decision::Deny);
+    assert_eq!(unresolved_policy.evaluate(&process, &root), Decision::Deny);
+
     std::fs::remove_file(file).unwrap();
     std::fs::remove_dir(root).unwrap();
 }
