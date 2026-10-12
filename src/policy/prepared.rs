@@ -2,7 +2,10 @@
 //! Policy/PathPattern types keep their existing representation and behavior.
 
 use super::model::{PathPattern, Policy};
-use super::path::{is_home_relative, normalize_pattern, resolve_runtime_path_with_home};
+use super::path::{
+    canonicalize_pattern_anchor, is_home_relative, normalize_pattern,
+    resolve_runtime_path_with_home,
+};
 use crate::engine::{Decision, NiteraRequest, Operation, Resource, Target};
 use std::ffi::OsString;
 use std::path::Path;
@@ -18,17 +21,43 @@ struct PreparedPath {
     prefix: String,
     tail: Tail,
     home_relative: bool,
+    resolution_error: bool,
 }
 
 impl PreparedPath {
+    #[cfg(test)]
     fn new(pattern: &PathPattern, base: &Path) -> Self {
+        Self::with_options(pattern, base, false, false)
+    }
+
+    fn with_options(
+        pattern: &PathPattern,
+        base: &Path,
+        preserve_exact_final: bool,
+        canonicalize_paths: bool,
+    ) -> Self {
         let home_relative = is_home_relative(Path::new(&pattern.0));
         let Ok(normalized) = normalize_pattern(&pattern.0, base) else {
             return Self {
                 prefix: String::new(),
                 tail: Tail::Never,
                 home_relative,
+                resolution_error: false,
             };
+        };
+        let normalized = if canonicalize_paths {
+            let Ok(normalized) = canonicalize_pattern_anchor(&normalized, preserve_exact_final)
+            else {
+                return Self {
+                    prefix: String::new(),
+                    tail: Tail::Never,
+                    home_relative,
+                    resolution_error: true,
+                };
+            };
+            normalized
+        } else {
+            normalized
         };
         let parts: Vec<_> = normalized.split('/').collect();
         let Some(first_glob) = parts.iter().position(|part| matches!(*part, "*" | "**")) else {
@@ -36,6 +65,7 @@ impl PreparedPath {
                 prefix: normalized,
                 tail: Tail::Exact,
                 home_relative,
+                resolution_error: false,
             };
         };
         let prefix = parts[..first_glob].join("/");
@@ -55,6 +85,7 @@ impl PreparedPath {
             prefix,
             tail,
             home_relative,
+            resolution_error: false,
         }
     }
 
@@ -148,6 +179,7 @@ struct PathRules {
 
 struct PathSet {
     patterns: Vec<PreparedPath>,
+    resolution_error: bool,
     // Empty means the original scan. Otherwise the first rule stays in place
     // and the remaining rules are sorted by prefix.
     prefix_lengths: Box<[usize]>,
@@ -155,8 +187,10 @@ struct PathSet {
 
 impl PathSet {
     fn scan(patterns: Vec<PreparedPath>) -> Self {
+        let resolution_error = patterns.iter().any(|pattern| pattern.resolution_error);
         Self {
             patterns,
+            resolution_error,
             prefix_lengths: Box::default(),
         }
     }
@@ -186,11 +220,14 @@ impl PathSet {
             return Self::scan(patterns);
         }
 
+        let resolution_error = patterns.iter().any(|pattern| pattern.resolution_error);
+
         // Keep the first rule's cheap short circuit. Stable sorting retains the
         // order of the remaining rules sharing an anchor. Actions stay separate.
         patterns[1..].sort_by(|left, right| left.prefix.cmp(&right.prefix));
         Self {
             patterns,
+            resolution_error,
             prefix_lengths: prefix_lengths.into_boxed_slice(),
         }
     }
@@ -201,6 +238,10 @@ impl PathSet {
 
     fn has_home_relative(&self) -> bool {
         self.patterns.iter().any(|pattern| pattern.home_relative)
+    }
+
+    fn has_resolution_error(&self) -> bool {
+        self.resolution_error
     }
 
     #[inline]
@@ -245,21 +286,35 @@ impl PathSet {
     }
 }
 
-fn prepare(patterns: &[PathPattern], base: &Path) -> PathSet {
+fn prepare(
+    patterns: &[PathPattern],
+    base: &Path,
+    preserve_exact_final: bool,
+    canonicalize_paths: bool,
+) -> PathSet {
     PathSet::new(
         patterns
             .iter()
-            .map(|pattern| PreparedPath::new(pattern, base))
+            .map(|pattern| {
+                PreparedPath::with_options(pattern, base, preserve_exact_final, canonicalize_paths)
+            })
             .collect(),
     )
 }
 
 impl PathRules {
-    fn new(deny: &[PathPattern], ask: &[PathPattern], allow: &[PathPattern], base: &Path) -> Self {
+    fn new(
+        deny: &[PathPattern],
+        ask: &[PathPattern],
+        allow: &[PathPattern],
+        base: &Path,
+        preserve_exact_final: bool,
+        canonicalize_paths: bool,
+    ) -> Self {
         Self {
-            deny: prepare(deny, base),
-            ask: prepare(ask, base),
-            allow: prepare(allow, base),
+            deny: prepare(deny, base, preserve_exact_final, canonicalize_paths),
+            ask: prepare(ask, base, preserve_exact_final, canonicalize_paths),
+            allow: prepare(allow, base, preserve_exact_final, canonicalize_paths),
         }
     }
 
@@ -280,12 +335,19 @@ impl PathRules {
             || self.ask.has_home_relative()
             || self.allow.has_home_relative()
     }
+
+    fn has_resolution_error(&self) -> bool {
+        self.deny.has_resolution_error()
+            || self.ask.has_resolution_error()
+            || self.allow.has_resolution_error()
+    }
 }
 
 pub(crate) struct PreparedPolicy {
     // Retain the source for compatibility if HOME changes after loading. This
     // also leaves the public Policy API free to support caller mutations.
     source: Policy,
+    canonicalize_paths: bool,
     home: Option<OsString>,
     read: PathRules,
     write: PathRules,
@@ -295,15 +357,44 @@ pub(crate) struct PreparedPolicy {
 }
 
 impl PreparedPolicy {
-    pub(crate) fn new(source: Policy, base: &Path) -> Self {
+    pub(crate) fn new(source: Policy, base: &Path, canonicalize_paths: bool) -> Self {
         let fs = &source.filesystem;
         Self {
             home: std::env::var_os("HOME"),
-            read: PathRules::new(&fs.deny.read, &fs.ask.read, &fs.allow.read, base),
-            write: PathRules::new(&fs.deny.write, &fs.ask.write, &fs.allow.write, base),
-            delete: PathRules::new(&fs.deny.delete, &fs.ask.delete, &fs.allow.delete, base),
-            create: PathRules::new(&fs.deny.create, &fs.ask.create, &fs.allow.create, base),
-            scope: prepare(&source.process.scope, base),
+            canonicalize_paths,
+            read: PathRules::new(
+                &fs.deny.read,
+                &fs.ask.read,
+                &fs.allow.read,
+                base,
+                false,
+                canonicalize_paths,
+            ),
+            write: PathRules::new(
+                &fs.deny.write,
+                &fs.ask.write,
+                &fs.allow.write,
+                base,
+                false,
+                canonicalize_paths,
+            ),
+            delete: PathRules::new(
+                &fs.deny.delete,
+                &fs.ask.delete,
+                &fs.allow.delete,
+                base,
+                true,
+                canonicalize_paths,
+            ),
+            create: PathRules::new(
+                &fs.deny.create,
+                &fs.ask.create,
+                &fs.allow.create,
+                base,
+                true,
+                canonicalize_paths,
+            ),
+            scope: prepare(&source.process.scope, base, false, canonicalize_paths),
             source,
         }
     }
@@ -336,12 +427,21 @@ impl PreparedPolicy {
 
         let home = std::env::var_os("HOME");
         if home != self.home {
-            return self.source.evaluate(request, base);
+            // Rebuild anchors as well as home-relative patterns. Falling back
+            // to lexical rules here would reintroduce alias bypasses whenever
+            // the environment changed after loading.
+            let refreshed = Self::new(self.source.clone(), base, self.canonicalize_paths);
+            return refreshed.evaluate(request, base);
         }
         if home.is_none()
             && (is_home_relative(path)
                 || rules.is_some_and(PathRules::has_home_relative)
                 || (rules.is_none() && self.scope.has_home_relative()))
+        {
+            return Decision::Deny;
+        }
+        if rules.is_some_and(PathRules::has_resolution_error)
+            || (rules.is_none() && self.scope.has_resolution_error())
         {
             return Decision::Deny;
         }
@@ -398,7 +498,7 @@ mod tests {
             .into_iter()
             .map(|pattern| PathPattern(pattern.into())),
         );
-        let index = prepare(&patterns, base);
+        let index = prepare(&patterns, base, false, false);
         assert!(!index.prefix_lengths.is_empty());
         let scan: Vec<_> = patterns
             .iter()
@@ -444,11 +544,19 @@ mod tests {
         let broad: Vec<_> = (0..128)
             .map(|i| PathPattern(format!("/**/file{i}")))
             .collect();
-        assert!(prepare(&broad, base).prefix_lengths.is_empty());
+        assert!(
+            prepare(&broad, base, false, false)
+                .prefix_lengths
+                .is_empty()
+        );
         let irregular: Vec<_> = (1..=128)
             .map(|i| PathPattern(format!("/{}/**", "a".repeat(i))))
             .collect();
-        assert!(prepare(&irregular, base).prefix_lengths.is_empty());
+        assert!(
+            prepare(&irregular, base, false, false)
+                .prefix_lengths
+                .is_empty()
+        );
     }
 
     #[test]
@@ -462,7 +570,7 @@ mod tests {
         source.process.allow = vec!["git".into(), "sh".into(), "blocked".into()];
         source.process.ask = vec!["sh".into()];
         source.process.deny = vec!["blocked".into()];
-        let prepared = PreparedPolicy::new(source.clone(), base);
+        let prepared = PreparedPolicy::new(source.clone(), base, false);
         assert!(!prepared.scope.prefix_lengths.is_empty());
         for i in 0..132 {
             for command in ["git", "sh", "blocked", "unknown"] {
@@ -492,7 +600,7 @@ mod tests {
         }
         text.push_str("allow read /**\nask read /**/confirm\ndeny read /**/forbidden\n");
         let source = super::super::parse(&text).unwrap();
-        let prepared = PreparedPolicy::new(source.clone(), base);
+        let prepared = PreparedPolicy::new(source.clone(), base, false);
         assert!(!prepared.read.deny.prefix_lengths.is_empty());
         assert!(!prepared.read.ask.prefix_lengths.is_empty());
         assert!(!prepared.read.allow.prefix_lengths.is_empty());

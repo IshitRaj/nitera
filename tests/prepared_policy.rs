@@ -303,6 +303,29 @@ fn home_changes_child() {
     assert_eq!(unresolved_nitera.check(&process), Decision::Deny);
     assert_eq!(unresolved_policy.evaluate(&process, &root), Decision::Deny);
 
+    #[cfg(unix)]
+    {
+        let home_a = root.join("alias-home-a");
+        let home_b = root.join("alias-home-b");
+        for home in [&home_a, &home_b] {
+            std::fs::create_dir_all(home.join("allowed")).unwrap();
+            std::fs::create_dir_all(home.join("Secrets")).unwrap();
+            std::fs::write(home.join("Secrets/key"), b"synthetic secret").unwrap();
+            std::os::unix::fs::symlink(home.join("Secrets"), home.join("allowed/escape")).unwrap();
+            std::os::unix::fs::symlink(home.join("Secrets"), home.join("private-alias")).unwrap();
+        }
+        let alias_text = "[filesystem]\nallow read ~/allowed/**\ndeny read ~/private-alias/**\n";
+        std::fs::write(&file, alias_text).unwrap();
+        unsafe { std::env::set_var("HOME", &home_a) };
+        let alias_nitera = Nitera::load(&file).unwrap();
+        unsafe { std::env::set_var("HOME", &home_b) };
+        assert!(matches!(
+            alias_nitera.read(home_b.join("allowed/escape/key")),
+            Err(nitera::NiteraOperationError::Denied)
+        ));
+        unsafe { std::env::remove_var("HOME") };
+    }
+
     std::fs::remove_file(file).unwrap();
-    std::fs::remove_dir(root).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }

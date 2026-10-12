@@ -1,6 +1,6 @@
 use crate::approval::{ApprovalDecision, ApprovalHandler};
 use crate::engine::{CreateKind, Decision, NiteraRequest, Operation};
-use crate::policy::path::resolve_runtime_path;
+use crate::policy::path::{resolve_guarded_path, resolve_runtime_path};
 use crate::policy::prepared::PreparedPolicy;
 use crate::policy::{ParseError, parse};
 use std::io::Write;
@@ -18,6 +18,7 @@ pub enum NiteraOperationError {
 
 pub struct Nitera {
     policy: PreparedPolicy,
+    advisory_policy: PreparedPolicy,
     root: std::path::PathBuf,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
@@ -90,7 +91,8 @@ impl Nitera {
             .map_err(NiteraError::Io)?;
 
         Ok(Self {
-            policy: PreparedPolicy::new(policy, &root),
+            policy: PreparedPolicy::new(policy.clone(), &root, true),
+            advisory_policy: PreparedPolicy::new(policy, &root, false),
             root,
             approval_handler: None,
         })
@@ -104,7 +106,7 @@ impl Nitera {
 
     /// Evaluates a request against the loaded policy.
     pub fn check(&self, request: &NiteraRequest) -> Decision {
-        self.policy.evaluate(request, &self.root)
+        self.advisory_policy.evaluate(request, &self.root)
     }
 
     /// Authorizes a request using the policy and, when required, the approval handler.
@@ -113,25 +115,36 @@ impl Nitera {
     /// For `Ask`, the configured approval handler is consulted. If no handler is
     /// configured, the request is returned as `NiteraOperationError::Ask`.
     fn authorize(&self, request: &NiteraRequest) -> Result<(), NiteraOperationError> {
-        match self.check(request) {
+        self.authorize_as(request, request)
+    }
+
+    fn authorize_as(
+        &self,
+        request: &NiteraRequest,
+        displayed_request: &NiteraRequest,
+    ) -> Result<(), NiteraOperationError> {
+        match self.policy.evaluate(request, &self.root) {
             Decision::Allow => Ok(()),
             Decision::Deny => Err(NiteraOperationError::Denied),
             Decision::Ask => match &self.approval_handler {
-                Some(handler) => match handler.approve(request) {
+                Some(handler) => match handler.approve(displayed_request) {
                     ApprovalDecision::Approved => Ok(()),
                     ApprovalDecision::Denied => Err(NiteraOperationError::Denied),
                 },
-                None => Err(NiteraOperationError::Ask(request.clone())),
+                None => Err(NiteraOperationError::Ask(displayed_request.clone())),
             },
         }
     }
 
     /// Reads a file after policy authorization.
     pub fn read(&self, path: impl AsRef<std::path::Path>) -> Result<Vec<u8>, NiteraOperationError> {
-        let request_path =
+        let display_path =
             resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
+        let request_path =
+            resolve_guarded_path(&display_path, false).map_err(NiteraOperationError::Io)?;
         let request = NiteraRequest::filesystem(Operation::Read, request_path.clone());
-        self.authorize(&request)?;
+        let displayed = NiteraRequest::filesystem(Operation::Read, display_path);
+        self.authorize_as(&request, &displayed)?;
         std::fs::read(&request_path).map_err(NiteraOperationError::Io)
     }
 
@@ -141,19 +154,25 @@ impl Nitera {
         path: impl AsRef<std::path::Path>,
         content: impl AsRef<[u8]>,
     ) -> Result<(), NiteraOperationError> {
-        let request_path =
+        let display_path =
             resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
+        let request_path =
+            resolve_guarded_path(&display_path, false).map_err(NiteraOperationError::Io)?;
         let request = NiteraRequest::filesystem(Operation::Write, request_path.clone());
-        self.authorize(&request)?;
+        let displayed = NiteraRequest::filesystem(Operation::Write, display_path);
+        self.authorize_as(&request, &displayed)?;
         std::fs::write(&request_path, content).map_err(NiteraOperationError::Io)
     }
 
     /// Deletes a file after policy authorization.
     pub fn delete(&self, path: impl AsRef<std::path::Path>) -> Result<(), NiteraOperationError> {
-        let request_path =
+        let display_path =
             resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
+        let request_path =
+            resolve_guarded_path(&display_path, true).map_err(NiteraOperationError::Io)?;
         let request = NiteraRequest::filesystem(Operation::Delete, request_path.clone());
-        self.authorize(&request)?;
+        let displayed = NiteraRequest::filesystem(Operation::Delete, display_path);
+        self.authorize_as(&request, &displayed)?;
         std::fs::remove_file(&request_path).map_err(NiteraOperationError::Io)
     }
 
@@ -186,10 +205,13 @@ impl Nitera {
         kind: CreateKind,
         content: Option<&[u8]>,
     ) -> Result<(), NiteraOperationError> {
-        let request_path =
+        let display_path =
             resolve_runtime_path(path.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
+        let request_path =
+            resolve_guarded_path(&display_path, true).map_err(NiteraOperationError::Io)?;
         let request = NiteraRequest::create(request_path.clone(), kind);
-        self.authorize(&request)?;
+        let displayed = NiteraRequest::create(display_path.clone(), kind);
+        self.authorize_as(&request, &displayed)?;
 
         let result = match content {
             Some(bytes) => std::fs::OpenOptions::new()
@@ -202,7 +224,7 @@ impl Nitera {
 
         result.map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
-                NiteraOperationError::AlreadyExists(request_path)
+                NiteraOperationError::AlreadyExists(display_path)
             } else {
                 NiteraOperationError::Io(error)
             }
@@ -222,10 +244,13 @@ impl Nitera {
     {
         let command = command.into();
         let args: Vec<String> = args.into_iter().map(Into::into).collect();
-        let request_cwd =
+        let display_cwd =
             resolve_runtime_path(cwd.as_ref(), &self.root).map_err(NiteraOperationError::Io)?;
+        let request_cwd =
+            resolve_guarded_path(&display_cwd, false).map_err(NiteraOperationError::Io)?;
         let request = NiteraRequest::process(&command, args.clone(), request_cwd.clone());
-        self.authorize(&request)?;
+        let displayed = NiteraRequest::process(&command, args.clone(), display_cwd);
+        self.authorize_as(&request, &displayed)?;
         std::process::Command::new(&command)
             .args(&args)
             .current_dir(&request_cwd)
