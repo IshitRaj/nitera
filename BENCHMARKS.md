@@ -106,3 +106,30 @@ Left: before any optimization, after the constant-factor scan optimization, and 
 - The harness covers one workload shape: a last-match filesystem read. Other rule shapes (early matches, misses, shared prefixes, exact paths, broad globs) aren't covered by the numbers above.
 - Load time and memory overhead from building the index haven't been independently re-measured on this machine; the only figures available are self-reported by the indexing PR on different hardware, so they're left out of this document rather than mixed in.
 - Single machine, single measurement session per stage. All figures are on macOS; other platforms would need their own runs.
+
+## Guarded filesystem operation
+
+[`benches/guarded_read.rs`](./benches/guarded_read.rs) measures a warm, cached
+`Nitera::read("./payload")` end to end, including path resolution, policy
+authorization, and the file read. It performs 1,000 warmup calls followed by
+10,000 individually timed calls. The fixture is a small synthetic file under
+a temporary policy root; the OS page cache is warm. Reproduce with:
+
+```bash
+cargo bench --bench guarded_read
+```
+
+On the same Apple M2/macOS machine and release profile as the check benchmark,
+two runs at each revision produced these medians:
+
+| Revision | p50 range | p95 range | p99 range |
+|---|---:|---:|---:|
+| Baseline `9b4a440` | 11.75–11.83 µs | 12.33–12.96 µs | 14.46–16.46 µs |
+| Resolved-path changes | 25.29–25.33 µs | 25.88–26.96 µs | 28.58–32.38 µs |
+
+The median guarded read is about 2.15x the baseline, an increase of roughly
+13.5 µs for this cached-file workload. The additional filesystem resolution
+is the main cost; this is material for high-frequency guarded operations.
+The lexical `check()` benchmark remains within the existing sub-microsecond
+range. These measurements do not represent uncached disk reads, other
+filesystems, or concurrent namespace changes.

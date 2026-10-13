@@ -151,6 +151,130 @@ pub fn normalize_runtime_path(path: impl AsRef<Path>) -> std::io::Result<PathBuf
     resolve_runtime_path(path, cwd)
 }
 
+/// Resolve a path for a guarded operation. Existing targets are followed;
+/// entry operations canonicalize the parent and preserve the final name.
+pub(crate) fn resolve_guarded_path(
+    path: &Path,
+    preserve_final_component: bool,
+) -> std::io::Result<PathBuf> {
+    if preserve_final_component {
+        return canonicalize_parent_and_append(path);
+    }
+
+    match path.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Distinguish a missing final entry from a dangling symlink. The
+            // latter must fail closed instead of being treated as a new name.
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => Err(error),
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    canonicalize_parent_and_append(path)
+                }
+                Err(metadata_error) => Err(metadata_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn canonicalize_parent_and_append(path: &Path) -> std::io::Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no final component",
+        )
+    })?;
+    Ok(parent.canonicalize()?.join(name))
+}
+
+pub(crate) fn canonicalize_pattern_anchor(
+    pattern: &str,
+    preserve_exact_final: bool,
+) -> std::io::Result<String> {
+    #[cfg(not(unix))]
+    {
+        let _ = preserve_exact_final;
+        return Ok(pattern.to_owned());
+    }
+
+    #[cfg(unix)]
+    {
+        let components: Vec<_> = pattern
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect();
+        let first_glob = components
+            .iter()
+            .position(|part| matches!(*part, "*" | "**"));
+        let anchor_end = first_glob.unwrap_or(components.len());
+        let mut anchor = PathBuf::from("/");
+        for part in &components[..anchor_end] {
+            anchor.push(part);
+        }
+
+        let canonical_anchor = if first_glob.is_none() && preserve_exact_final {
+            canonicalize_entry_with_missing_parent(&anchor)?
+        } else {
+            canonicalize_with_missing_tail(&anchor)?
+        };
+        let suffix = first_glob.map(|index| &components[index..]).unwrap_or(&[]);
+        let mut result = canonical_anchor.to_string_lossy().into_owned();
+        for part in suffix {
+            if !result.ends_with('/') {
+                result.push('/');
+            }
+            result.push_str(part);
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(unix)]
+fn canonicalize_entry_with_missing_parent(path: &Path) -> std::io::Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no final component",
+        )
+    })?;
+    Ok(canonicalize_with_missing_tail(parent)?.join(name))
+}
+
+#[cfg(unix)]
+fn canonicalize_with_missing_tail(path: &Path) -> std::io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(&current) {
+            Ok(_) => {
+                let mut resolved = current.canonicalize()?;
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name() else {
+                    return Err(error);
+                };
+                missing.push(name.to_os_string());
+                if !current.pop() {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Normalize a glob pattern against a base directory.
 ///
 /// Relative patterns are resolved against `base`.

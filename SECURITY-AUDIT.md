@@ -1,17 +1,13 @@
 # Security and hardening audit
 
-**Status: items 4, 5, 13, and 17 are fixed in the repository (not yet
-released). Items 6, 12, and 16 are fixed and shipped in 1.0.1, the first
-published version to contain them. Item 19 is fixed in the repository only,
-because `examples/` is not part of the published package, so no release
-carries it. Items 1, 2, 3, and 18 are open, and 1, 2, and 18 are confirmed
-policy bypasses. Item 18 is another instance of unresolved filesystem
-aliases, not an independent vulnerability class.**
+**Status: items 1 and 18 have static-alias mitigations in the repository, not
+yet released. Concurrent namespace replacement is outside their guarantee.
+Items 4, 5, 13, and 17 are fixed in the repository (not yet released). Items
+6, 12, and 16 are fixed and shipped in 1.0.1. Item 19 is fixed in the
+repository only because `examples/` is not packaged. Items 2 and 3 remain open;
+item 18 is a macOS instance of item 1's alias class.**
 
-The path-authorization work for items 1 and 18 was prototyped but is not on
-`main` and is not in any published version. 1.0.1 contains only the two
-parser and loading corrections and the `Debug` impl. Anyone who needs the
-symlink and alias bypasses closed must not assume a published release does so.
+The path-authorization mitigation is in the current working changes but is not yet merged or released. 1.0.1 contains only the earlier parser/loading corrections and the `Debug` impl. Anyone relying on a published version must not assume it closes symlink or `/tmp` alias bypasses.
 
 This document records findings and a corrected remediation plan. Updating
 the document does not fix the implementation. The original audit targeted
@@ -75,7 +71,7 @@ Numbering matches the detailed findings and sequencing table.
 
 | # | Finding | Class | Evidence | Status |
 |---|---|---|---|---|
-| 1 | Symlink traversal bypasses narrow allows and explicit denies | security | protected synthetic payload returned | open |
+| 1 | Symlink traversal bypasses narrow allows and explicit denies | security | file/directory symlink, policy-anchor, cwd, create, delete, and failure regressions pass on macOS | static aliases mitigated in repository; races and non-Unix platforms remain open |
 | 2 | Case-insensitive filesystem names bypass case-sensitive denies | security | protected synthetic payload returned on macOS | open |
 | 3 | Windows path representation and HOME assumptions | correctness | source inspection; Windows execution required | open |
 | 4 | Commas cannot be represented literally in values | grammar limitation | quoted values and decision regression added | fixed in repository, unreleased |
@@ -92,7 +88,7 @@ Numbering matches the detailed findings and sequencing table.
 | 15 | Public types have compatibility constraints on extension | API evolution | type definitions inspected | open |
 | 16 | Nitera lacks Debug in 1.0.0 | ergonomics | implementation and regression test reviewed | fixed, shipped in 1.0.1 (#3) |
 | 17 | Normalization errors become nonmatching patterns | latent hardening concern | unresolved tilde rules fail closed in public and prepared evaluators | fixed in repository, unreleased |
-| 18 | /tmp versus /private/tmp alias can bypass a deny | security, related to #1 | protected synthetic payload returned | open |
+| 18 | /tmp versus /private/tmp alias can bypass a deny | security, related to #1 | macOS `/tmp` alias regression denies the synthetic read | mitigated in repository, unreleased |
 | 19 | Example host allow is overridden by deny host * | documentation | resulting Deny verified | fixed, repository only |
 
 ## Security and platform correctness
@@ -141,11 +137,24 @@ missing parents, dangling links, symlink loops, and delete-link versus
 delete-target behavior. For a race-resistant claim, include adversarial
 replacement tests against the selected backend. Include item 18's probe.
 
+**Status: static aliases mitigated in repository, unreleased.** Guarded methods
+resolve existing read/write targets and working directories, resolve parents
+for writes to new entries and create operations, and preserve the final
+component for deletes. Prepared literal policy anchors use matching resolution
+semantics. Resolution errors fail closed. `Nitera::check()` remains a lexical,
+advisory evaluation. Regression coverage is in `tests/nitera.rs`, including
+the actual `/tmp` alias on macOS and synthetic symlink cases.
+
+This implementation explicitly excludes concurrent replacement of directory
+entries between canonicalization, authorization, and the subsequent syscall.
+It has no handle-based backend and makes no race-resistance claim. Alias tests
+ran on macOS; non-Unix policy-anchor semantics have not been runtime-verified.
+Item 2's case-equivalent names remain open.
+
 **Cost and scope.** Filesystem resolution adds I/O and varies with platform,
 path depth, caches, and filesystem. Rust's `canonicalize` uses Unix
 `realpath` or Windows APIs; one Rust call is not a guarantee of one syscall.
 Measure end-to-end guarded operations separately from lexical `check()`.
-This is a substantial security change, not a one-helper patch.
 
 ### 2. Case-folding and equivalent filesystem names
 
@@ -411,7 +420,7 @@ Review item 17 in the same change.
 **Status: fixed in repository, unreleased.** Ordinary absolute and relative
 paths resolve without reading HOME; only `~` and `~/...` require it. Public
 and prepared evaluators preserve the existing behavior when HOME changes: a
-loaded policy falls back to the source evaluator. With HOME unset, any request
+loaded policy rebuilds its prepared rules against the new value. With HOME unset, any request
 or relevant rule that is home-relative returns Deny, preventing an unresolved
 deny, ask, or process scope from falling through to a broader allow.
 Regression coverage runs environment changes in an isolated child in
@@ -485,7 +494,7 @@ concern if a failed deny can coexist with a successful allow.
 prepared without HOME, and the public matcher returns false for that pattern.
 The policy evaluators now detect unresolved home-relative rules and return
 Deny rather than allowing a broad rule to match. When HOME changes, the loaded
-policy still falls back to the source evaluator, which applies the same guard.
+policy rebuilds its prepared rules against the new value, which applies the same guard.
 
 **Status: fixed with item 13.** This closes the fail-open composition concern
 without changing the public matcher API or making policy loading fallible.
@@ -518,6 +527,10 @@ actually used; do not rely on users spelling every alias canonically.
 **Required checks.** Both spellings, relative and absolute denies, broad
 allows, and supported operations. Run the actual alias case on macOS and
 an explicit directory-symlink analogue where the /tmp alias is absent.
+
+**Status: mitigated with item 1 in the repository, unreleased.** The regression
+uses `/tmp/<fixture>/policy.nitera` and verifies that the broad allow plus
+relative deny returns `Denied` for a guarded read through the alias.
 
 ### 19. Contradictory example policy
 
@@ -573,7 +586,7 @@ across changes that temporarily allow requests the policy should deny.
 | Merged and released | 6, 12, 16 | Fixes from #3 and test cleanup from #5, first published in 1.0.1. Preserve; no replacement implementation needed. |
 | Landed early | 19 | Example policy corrected independently of the path work; repository only, no release carries it, 1.0.1 included. |
 | 1 | 1, 2, 3, 18 | Commit isolated bypass regressions and a platform/path semantics contract; distinguish static-alias mitigation from race resistance. |
-| 2 | 1, 18 | Implement shared, operation-aware resolved authorization; pass symlink, alias, creation, deletion, and cwd checks; benchmark guarded operations. |
+| 2 | 1, 18 | Completed in repository for static aliases: operation-aware resolved authorization, regression coverage, explicit race exclusion, and guarded-read benchmark. |
 | 3 | 2, 3 | Enforce supported filesystem name equivalence through both matchers and candidate indexes; reject unsupported enforcement modes; run platform tests. |
 | 4 | 13, 17 | Completed in repository: HOME needed only for tilde paths; unresolved home-relative rules fail closed in both evaluators. |
 | 5 | 4, 5 | Completed in repository: additive quoted-value grammar; parsing and decision regressions. |

@@ -159,7 +159,7 @@ Evaluates a request without performing the guarded operation or consulting an ap
 
 ### Evaluation of loaded policies
 
-`Nitera::check()` uses the internal prepared policy. Filesystem checks select the rule lists for the requested operation and test `deny`, then `ask`, then `allow`. No match, or a resource/operation/target combination that is not supported, returns `Deny`.
+`Nitera::check()` uses the lexical prepared policy. It is advisory: it does not resolve symlinks and cannot stand in for a guarded operation. Guarded filesystem and process methods resolve the path through the filesystem before evaluating their prepared policy. Existing read/write targets and working directories follow symlinks; delete and create preserve the final component while resolving the parent, so deleting a symlink authorizes and removes the link itself. A missing write target resolves through its existing parent. Resolution errors stop the operation. Filesystem checks select the rule lists for the requested operation and test `deny`, then `ask`, then `allow`. No match, or a resource/operation/target combination that is not supported, returns `Deny`.
 
 Each path rule list chooses between a scan and a sorted prefix index:
 
@@ -170,7 +170,9 @@ Each path rule list chooses between a scan and a sorted prefix index:
 
 Process scopes use the same path lookup. A matching scope is required before the command's deny/ask/allow lists are evaluated. Commands still use exact string matching, and network rules still scan host patterns. The index does not cache request decisions or change precedence.
 
-While `HOME` matches its value at load time, path checks use the prepared rules. If it changes, checks use the retained source policy and resolve home-relative rules against the current value. Ordinary paths and policies work when `HOME` is unset. If a request or any relevant rule uses a home-relative path while `HOME` is unset, that filesystem or process check returns `Deny`; an unresolved rule cannot fall through to a broader allow or scope.
+If `HOME` changes, checks rebuild the prepared path rules against the current value. Ordinary paths and policies work when `HOME` is unset. If a request or any relevant rule uses a home-relative path while `HOME` is unset, that filesystem or process check returns `Deny`; an unresolved rule cannot fall through to a broader allow or scope.
+
+Path resolution closes static symlink and `/tmp`-style alias mismatches for guarded operations on Unix. It does not prevent an attacker from replacing directory entries between authorization and the filesystem syscall. Case-equivalent names on case-insensitive filesystems also remain outside this guarantee; see security audit items 2 and 3.
 
 Preparation and sorting add load-time work and temporary memory. Lookup can avoid visiting unrelated rules in a selective set, but broad glob groups may still require many matches. See [`BENCHMARKS.md`](BENCHMARKS.md) for the reported Apple M2 measurements, charts, and comparison limits.
 

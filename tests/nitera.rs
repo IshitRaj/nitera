@@ -279,6 +279,209 @@ fn read_denies_disallowed_path() {
     let _ = fs::remove_file(&file_path);
 }
 
+#[cfg(unix)]
+#[test]
+fn guarded_read_resolves_symlinks_and_policy_anchors() {
+    let root = unique_path("resolved-read");
+    let allowed = root.join("allowed");
+    let secrets = root.join("Secrets");
+    fs::create_dir_all(&allowed).unwrap();
+    fs::create_dir_all(&secrets).unwrap();
+    fs::write(secrets.join("key"), b"synthetic protected data").unwrap();
+    std::os::unix::fs::symlink(&secrets, allowed.join("escape")).unwrap();
+    std::os::unix::fs::symlink(&secrets, root.join("secret-alias")).unwrap();
+
+    let policy_path = root.join("policy.nitera");
+    fs::write(
+        &policy_path,
+        format!(
+            "[filesystem]\nallow read ./allowed/**\ndeny read {}\n",
+            root.join("secret-alias/**").display()
+        ),
+    )
+    .unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+
+    assert!(matches!(
+        nitera.read(allowed.join("escape/key")),
+        Err(NiteraOperationError::Denied)
+    ));
+    assert!(matches!(
+        nitera.read(secrets.join("key")),
+        Err(NiteraOperationError::Denied)
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_read_does_not_follow_an_allowed_file_symlink_outside_its_target_rule() {
+    let root = unique_path("read-file-link");
+    let allowed = root.join("allowed");
+    fs::create_dir_all(&allowed).unwrap();
+    let secret = root.join("secret");
+    fs::write(&secret, b"synthetic protected data").unwrap();
+    std::os::unix::fs::symlink(&secret, allowed.join("link")).unwrap();
+    let policy_path = root.join("policy.nitera");
+    fs::write(&policy_path, "[filesystem]\nallow read ./allowed/**\n").unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+
+    assert!(matches!(
+        nitera.read(allowed.join("link")),
+        Err(NiteraOperationError::Denied)
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_write_authorizes_the_symlink_target() {
+    let root = unique_path("write-file-link");
+    let allowed = root.join("allowed");
+    fs::create_dir_all(&allowed).unwrap();
+    let secret = root.join("secret");
+    fs::write(&secret, b"keep original").unwrap();
+    std::os::unix::fs::symlink(&secret, allowed.join("link")).unwrap();
+    let policy_path = root.join("policy.nitera");
+    fs::write(
+        &policy_path,
+        "[filesystem]\nallow write ./allowed/**\ndeny write ./secret\n",
+    )
+    .unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+
+    assert!(matches!(
+        nitera.write(allowed.join("link"), b"blocked"),
+        Err(NiteraOperationError::Denied)
+    ));
+    assert_eq!(fs::read(&secret).unwrap(), b"keep original");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_process_rejects_symlinked_working_directory_outside_scope() {
+    let root = unique_path("cwd-link");
+    let allowed = root.join("allowed");
+    let outside = root.join("outside");
+    fs::create_dir_all(&allowed).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, allowed.join("work")).unwrap();
+    let policy_path = root.join("policy.nitera");
+    fs::write(
+        &policy_path,
+        "[process]\nallow scope ./allowed/**\nallow command echo\n",
+    )
+    .unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+
+    assert!(matches!(
+        nitera.execute("echo", ["never runs"], allowed.join("work")),
+        Err(NiteraOperationError::Denied)
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn create_authorization_resolves_a_symlinked_parent_before_deny_matching() {
+    let root = unique_path("create-parent-link");
+    fs::create_dir_all(&root).unwrap();
+    let secrets = root.join("Secrets");
+    fs::create_dir_all(&secrets).unwrap();
+    std::os::unix::fs::symlink(&secrets, root.join("writable")).unwrap();
+    let policy_path = root.join("policy.nitera");
+    fs::write(
+        &policy_path,
+        "[filesystem]\nallow create ./writable/**\ndeny create ./Secrets/**\n",
+    )
+    .unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+
+    assert!(matches!(
+        nitera.create(root.join("writable/new"), b"blocked"),
+        Err(NiteraOperationError::Denied)
+    ));
+    assert!(!secrets.join("new").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_delete_removes_a_symlink_without_deleting_its_target() {
+    let root = unique_path("delete-link");
+    fs::create_dir_all(&root).unwrap();
+    let target = root.join("protected");
+    let link = root.join("link");
+    fs::write(&target, b"keep this target").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let policy_path = root.join("policy.nitera");
+    fs::write(&policy_path, "[filesystem]\nallow delete ./link\n").unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+
+    nitera.delete(&link).unwrap();
+    assert!(!link.exists());
+    assert_eq!(fs::read(&target).unwrap(), b"keep this target");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_path_resolution_stops_on_missing_parents_dangling_links_and_loops() {
+    let root = unique_path("resolution-errors");
+    fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(root.join("absent"), root.join("dangling")).unwrap();
+    std::os::unix::fs::symlink(root.join("loop-b"), root.join("loop-a")).unwrap();
+    std::os::unix::fs::symlink(root.join("loop-a"), root.join("loop-b")).unwrap();
+    let policy_path = root.join("policy.nitera");
+    fs::write(&policy_path, "[filesystem]\nallow read /**\n").unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+
+    for path in [
+        root.join("missing-parent/file"),
+        root.join("dangling"),
+        root.join("loop-a"),
+    ] {
+        assert!(matches!(
+            nitera.read(path),
+            Err(NiteraOperationError::Io(_))
+        ));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn guarded_read_enforces_denies_across_tmp_alias() {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/nitera-tmp-alias-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("key"), b"synthetic protected data").unwrap();
+    let policy_path = root.join("policy.nitera");
+    fs::write(
+        &policy_path,
+        "[filesystem]\nallow read /**\ndeny read ./**\n",
+    )
+    .unwrap();
+    let nitera = Nitera::load(&policy_path).unwrap();
+
+    assert!(matches!(
+        nitera.read(root.join("key")),
+        Err(NiteraOperationError::Denied)
+    ));
+    assert!(matches!(
+        nitera.read("./key"),
+        Err(NiteraOperationError::Denied)
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn read_returns_ask_for_ask_rule() {
     let dir = std::env::temp_dir();

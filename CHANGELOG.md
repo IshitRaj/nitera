@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Guarded filesystem and process operations now authorize resolved paths and resolved literal policy anchors, closing static symlink and macOS `/tmp` alias bypasses. `Nitera::check()` remains advisory; concurrent directory-entry replacement and case-equivalent filesystem names are outside this fix.
 - Policy values can now be double-quoted to include literal commas, hashes, and spaces. Quoted values support escaped quotes and backslashes; legacy unquoted values retain their previous interpretation. Malformed unclosed quoted values report their source line.
 - Ordinary filesystem and process paths no longer require `HOME`. If `HOME` is unset, a check involving a home-relative request, rule, or process scope fails closed, so an unresolved rule cannot be bypassed by a broad grant.
 
